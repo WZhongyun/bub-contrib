@@ -77,13 +77,13 @@ async def run_model(prompt: str, session_id: str, state: State) -> str:
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
         )
-        stdout, stderr = await process.communicate(prompt.encode())
+        stdout, _ = await process.communicate(prompt.encode())
     output_blocks: list[str] = []
     if stdout:
         output_blocks.append(stdout.decode())
-    if stderr and process.returncode != 0:
-        output_blocks.append(f"stderr: {stderr.decode()}")
+    if process.returncode != 0:
+        error_message = f"Codex process exited with code {process.returncode}."
+        output_blocks.append(error_message)
     return "\n".join(output_blocks)
