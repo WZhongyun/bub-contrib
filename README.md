@@ -13,12 +13,21 @@ Contrib packages for the `bub` ecosystem.
 - `packages/bub-schedule`
   - Bub plugin entry point: `schedule`
   - Provides scheduling channel/tools backed by APScheduler with a JSON job store.
+- `packages/bub-tapestore-sqlalchemy`
+  - Bub plugin entry point: `tapestore-sqlalchemy`
+  - Provides a SQLAlchemy-backed tape store for Bub conversation history.
+- `packages/bub-tapestore-sqlite`
+  - Bub plugin entry point: `tapestore-sqlite`
+  - Provides a SQLite-backed tape store for Bub conversation history.
 - `packages/bub-discord`
   - Bub plugin entry point: `discord`
   - Provides a Discord channel adapter for Bub message IO.
 - `packages/bub-web-search`
   - Provides a `web.search` tool backed by the Ollama web search API.
   - Registers the tool only when `BUB_SEARCH_OLLAMA_API_KEY` is configured.
+- `packages/bub-feishu`
+  - Bub plugin entry point: `feishu`
+  - Provides a Feishu channel adapter for Bub message IO.
 
 ## Prerequisites
 

@@ -9,8 +9,11 @@ dependencies = [
     "bub-codex",
     "bub-discord",
     "bub-schedule",
+    "bub-tapestore-sqlalchemy",
+    "bub-tapestore-sqlite",
     "bub-tg-feed",
     "bub-web-search",
+    "bub-feishu",
 ]
 
 [tool.uv.workspace]
@@ -22,4 +25,7 @@ bub-tg-feed = { workspace = true }
 bub-codex = { workspace = true }
 bub-discord = { workspace = true }
 bub-schedule = { workspace = true }
+bub-tapestore-sqlalchemy = { workspace = true }
+bub-tapestore-sqlite = { workspace = true }
 bub-web-search = { workspace = true }
+bub-feishu = { workspace = true }
