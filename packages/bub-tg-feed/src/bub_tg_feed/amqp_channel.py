@@ -398,6 +398,7 @@ class AMQPChannel(Channel):
             chat_id=chat_id,
             is_active=self.is_mentioned(payload),
             lifespan=self.typing_indicator(chat_id),
+            output_channel="null",
         )
         return message
 
