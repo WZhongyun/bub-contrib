@@ -403,6 +403,7 @@ version = "0.1.0"
 source = { editable = "packages/bub-feishu" }
 dependencies = [
     { name = "bub" },
+    { name = "httpx" },
     { name = "lark-oapi" },
     { name = "pydantic-settings" },
 ]
@@ -410,6 +411,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "bub", git = "https://github.com/bubbuild/bub.git" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "lark-oapi", specifier = ">=1.4.20" },
     { name = "pydantic-settings", specifier = ">=2.10.1" },
 ]
