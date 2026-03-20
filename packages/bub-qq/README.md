@@ -11,7 +11,7 @@ Implemented today:
 - QQ Open Platform config loading via `BUB_QQ_*` environment variables
 - Access token acquisition from `https://bots.qq.com/app/getAppAccessToken`
 - Cached token refresh with the official `60` second renewal window
-- A reusable `httpx`-based OpenAPI client that injects `Authorization: QQBot {ACCESS_TOKEN}`
+- A reusable `aiohttp`-based OpenAPI client that injects `Authorization: QQBot {ACCESS_TOKEN}`
 - Embedded `http-webhook` receiver with callback validation (`op = 13`)
 - QQ callback validation signature generation using the documented ed25519 seed derivation flow
 - Webhook request signature verification using `X-Signature-Ed25519` and `X-Signature-Timestamp`

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from bub_qq.auth import QQAuthError
 from bub_qq.gateway import heartbeat_payload
 from bub_qq.gateway import identify_payload
 from bub_qq.gateway import resume_payload
+from bub_qq.openapi_errors import QQKnownOpenAPIError
+from bub_qq.openapi_errors import QQOpenAPIError
+from bub_qq.websocket import _is_permanent_connect_error
 from bub_qq.ws_errors import QQWebSocketFatalError
 from bub_qq.ws_errors import raise_for_close_code
 
@@ -41,3 +45,31 @@ def test_websocket_fatal_close_code_stops_reconnect() -> None:
         assert "banned" in str(exc)
     else:
         raise AssertionError("expected fatal websocket close code")
+
+
+def test_websocket_auth_errors_are_treated_as_permanent() -> None:
+    assert _is_permanent_connect_error(QQAuthError("bad credentials")) is True
+
+
+def test_websocket_non_retryable_openapi_errors_are_treated_as_permanent() -> None:
+    error = QQOpenAPIError(
+        status_code=403,
+        trace_id="trace-1",
+        error_code=11253,
+        error_message="permission denied",
+        known=QQKnownOpenAPIError(11253, "ErrorCheckAppPrivilegeNotPass", "应用未获得调用接口权限", "permission", False),
+    )
+
+    assert _is_permanent_connect_error(error) is True
+
+
+def test_websocket_retryable_openapi_errors_are_not_treated_as_permanent() -> None:
+    error = QQOpenAPIError(
+        status_code=429,
+        trace_id="trace-2",
+        error_code=22009,
+        error_message="msg limit exceed",
+        known=QQKnownOpenAPIError(22009, "MsgLimitExceed", "消息发送超频", "rate_limit", True),
+    )
+
+    assert _is_permanent_connect_error(error) is False

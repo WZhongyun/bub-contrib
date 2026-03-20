@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-
-import httpx
+from collections.abc import Awaitable
+from collections.abc import Callable
+from typing import Any
+from typing import Protocol
 
 from bub_qq.auth import QQTokenProvider
 from bub_qq.config import QQConfig
@@ -18,26 +20,107 @@ class Clock:
         return self.now
 
 
+class FakeResponse:
+    def __init__(
+        self,
+        *,
+        status: int,
+        payload: Any = None,
+        headers: dict[str, str] | None = None,
+        reason: str = "OK",
+    ) -> None:
+        self.status = status
+        self.payload = payload
+        self.headers = headers or {}
+        self.reason = reason
+
+
+class OpenAPIRequest(Protocol):
+    method: str
+    url: str
+    params: dict[str, object] | None
+    json: dict[str, object] | None
+    headers: dict[str, str]
+
+
+class _OpenAPIRequest:
+    def __init__(
+        self,
+        *,
+        method: str,
+        url: str,
+        params: dict[str, object] | None,
+        json: dict[str, object] | None,
+        headers: dict[str, str],
+    ) -> None:
+        self.method = method
+        self.url = url
+        self.params = params
+        self.json = json
+        self.headers = headers
+
+
+class FakeTokenClient:
+    def __init__(
+        self,
+        handler: Callable[[str, dict[str, object]], Awaitable[FakeResponse]],
+    ) -> None:
+        self._handler = handler
+
+    async def post(self, url: str, **kwargs: object) -> dict[str, object]:
+        response = await self._handler(url, kwargs)
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(
+                f"qq token request failed: http={response.status} reason={response.reason}"
+            )
+        if not isinstance(response.payload, dict):
+            raise RuntimeError(f"qq token response is not a JSON object: {response.payload!r}")
+        return response.payload
+
+
+class FakeOpenAPIClient:
+    def __init__(self, handler: Callable[[OpenAPIRequest], Awaitable[FakeResponse]]) -> None:
+        self._handler = handler
+
+    async def request(
+        self,
+        *,
+        method: str,
+        url: str,
+        params: dict[str, object] | None,
+        json: dict[str, object] | None,
+        headers: dict[str, str],
+    ) -> FakeResponse:
+        return await self._handler(
+            _OpenAPIRequest(
+                method=method,
+                url=url,
+                params=params,
+                json=json,
+                headers=headers,
+            )
+        )
+
+
 def test_token_provider_caches_until_refresh_boundary() -> None:
     async def _run() -> None:
         calls = {"count": 0}
 
-        async def handler(request: httpx.Request) -> httpx.Response:
-            del request
+        async def handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
             calls["count"] += 1
-            return httpx.Response(
-                200,
-                json={
+            return FakeResponse(
+                status=200,
+                payload={
                     "access_token": f"token-{calls['count']}",
                     "expires_in": 120,
                 },
             )
 
         clock = Clock()
-        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         provider = QQTokenProvider(
             QQConfig(appid="app", secret="secret", token_refresh_skew_seconds=60),
-            client=client,
+            client=FakeTokenClient(handler),
             clock=clock,
         )
 
@@ -50,8 +133,6 @@ def test_token_provider_caches_until_refresh_boundary() -> None:
         clock.now = 60
         assert await provider.get_token() == "token-2"
 
-        await client.aclose()
-
     asyncio.run(_run())
 
 
@@ -59,39 +140,29 @@ def test_openapi_adds_authorization_header() -> None:
     async def _run() -> None:
         captured: dict[str, str] = {}
 
-        async def openapi_handler(request: httpx.Request) -> httpx.Response:
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
             captured["authorization"] = request.headers["Authorization"]
             captured["content_type"] = request.headers["Content-Type"]
-            return httpx.Response(200, json={"ok": True})
+            return FakeResponse(status=200, payload={"ok": True})
 
-        async def token_handler(request: httpx.Request) -> httpx.Response:
-            del request
-            return httpx.Response(
-                200,
-                json={"access_token": "abc", "expires_in": 7200},
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
             )
 
-        openapi_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(openapi_handler),
-            base_url="https://api.sgroup.qq.com",
-        )
-        token_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(token_handler),
-        )
         provider = QQTokenProvider(
             QQConfig(appid="app", secret="secret"),
-            client=token_client,
+            client=FakeTokenClient(token_handler),
         )
-        openapi = QQOpenAPI(QQConfig(), provider, client=openapi_client)
+        openapi = QQOpenAPI(QQConfig(), provider, client=FakeOpenAPIClient(openapi_handler))
 
         payload = await openapi.post("/test", json_body={"ping": "pong"})
 
         assert payload == {"ok": True}
         assert captured["authorization"] == "QQBot abc"
         assert captured["content_type"] == "application/json"
-
-        await openapi_client.aclose()
-        await token_client.aclose()
 
     asyncio.run(_run())
 
@@ -100,30 +171,23 @@ def test_openapi_posts_c2c_text_message() -> None:
     async def _run() -> None:
         captured: dict[str, object] = {}
 
-        async def openapi_handler(request: httpx.Request) -> httpx.Response:
-            captured["path"] = request.url.path
-            captured["json"] = await request.aread()
-            return httpx.Response(200, json={"id": "reply-1", "timestamp": 123})
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            captured["path"] = request.url
+            captured["json"] = request.json
+            return FakeResponse(status=200, payload={"id": "reply-1", "timestamp": 123})
 
-        async def token_handler(request: httpx.Request) -> httpx.Response:
-            del request
-            return httpx.Response(
-                200,
-                json={"access_token": "abc", "expires_in": 7200},
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
             )
 
-        openapi_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(openapi_handler),
-            base_url="https://api.sgroup.qq.com",
-        )
-        token_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(token_handler),
-        )
         provider = QQTokenProvider(
             QQConfig(appid="app", secret="secret"),
-            client=token_client,
+            client=FakeTokenClient(token_handler),
         )
-        openapi = QQOpenAPI(QQConfig(), provider, client=openapi_client)
+        openapi = QQOpenAPI(QQConfig(), provider, client=FakeOpenAPIClient(openapi_handler))
 
         payload = await openapi.post_c2c_text_message(
             openid="user-openid",
@@ -134,43 +198,39 @@ def test_openapi_posts_c2c_text_message() -> None:
 
         assert payload["id"] == "reply-1"
         assert captured["path"] == "/v2/users/user-openid/messages"
-        assert captured["json"] == b'{"content":"hello","msg_type":0,"msg_id":"message-1","msg_seq":2}'
-
-        await openapi_client.aclose()
-        await token_client.aclose()
+        assert captured["json"] == {
+            "content": "hello",
+            "msg_type": 0,
+            "msg_id": "message-1",
+            "msg_seq": 2,
+        }
 
     asyncio.run(_run())
 
 
 def test_openapi_error_exposes_trace_id_and_business_code() -> None:
     async def _run() -> None:
-        async def openapi_handler(request: httpx.Request) -> httpx.Response:
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
             del request
-            return httpx.Response(
-                429,
+            return FakeResponse(
+                status=429,
                 headers={"X-Tps-trace-ID": "trace-123"},
-                json={"code": 22009, "message": "msg limit exceed"},
+                payload={"code": 22009, "message": "msg limit exceed"},
+                reason="Too Many Requests",
             )
 
-        async def token_handler(request: httpx.Request) -> httpx.Response:
-            del request
-            return httpx.Response(
-                200,
-                json={"access_token": "abc", "expires_in": 7200},
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
             )
 
-        openapi_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(openapi_handler),
-            base_url="https://api.sgroup.qq.com",
-        )
-        token_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(token_handler),
-        )
         provider = QQTokenProvider(
             QQConfig(appid="app", secret="secret"),
-            client=token_client,
+            client=FakeTokenClient(token_handler),
         )
-        openapi = QQOpenAPI(QQConfig(), provider, client=openapi_client)
+        openapi = QQOpenAPI(QQConfig(), provider, client=FakeOpenAPIClient(openapi_handler))
 
         try:
             await openapi.post("/test", json_body={"ping": "pong"})
@@ -181,9 +241,6 @@ def test_openapi_error_exposes_trace_id_and_business_code() -> None:
             assert "msg limit exceed" in str(exc)
         else:
             raise AssertionError("expected openapi request to fail")
-
-        await openapi_client.aclose()
-        await token_client.aclose()
 
     asyncio.run(_run())
 

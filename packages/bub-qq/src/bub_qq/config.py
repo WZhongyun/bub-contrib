@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,7 +25,7 @@ class QQConfig(BaseSettings):
     webhook_path: str = "/qq/webhook"
     webhook_callback_timeout_seconds: float = 15.0
     verify_signature: bool = True
-    inbound_dedupe_size: int = 1024
+    inbound_dedupe_size: int = Field(default=1024, ge=1)
     websocket_intents: int = 1 << 25
     websocket_use_shard_gateway: bool = False
     websocket_reconnect_delay_seconds: float = 5.0

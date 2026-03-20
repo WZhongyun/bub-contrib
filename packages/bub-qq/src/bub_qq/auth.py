@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable
+from typing import Protocol
 
-import httpx
+import aiohttp
 
 from .config import QQConfig
 
@@ -25,6 +26,10 @@ class QQAuthError(RuntimeError):
     """Raised when QQ token acquisition fails."""
 
 
+class TokenHTTPClient(Protocol):
+    async def post(self, url: str, **kwargs: object) -> dict[str, object]: ...
+
+
 class QQTokenProvider:
     """Fetch and cache QQ Open Platform access tokens."""
 
@@ -32,8 +37,8 @@ class QQTokenProvider:
         self,
         config: QQConfig,
         *,
-        client: httpx.AsyncClient | None = None,
-        clock: Any | None = None,
+        client: TokenHTTPClient | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._config = config
         self._client = client
@@ -60,8 +65,7 @@ class QQTokenProvider:
         if not self._config.appid or not self._config.secret:
             raise QQAuthError("qq appid/secret is empty")
 
-        response = await self._request_token()
-        payload = response.json()
+        payload = await self._request_token()
 
         access_token = str(payload.get("access_token") or "").strip()
         expires_in = payload.get("expires_in")
@@ -79,8 +83,8 @@ class QQTokenProvider:
             expires_at=float(self._clock()) + refresh_after,
         )
 
-    async def _request_token(self) -> httpx.Response:
-        kwargs: dict[str, Any] = {
+    async def _request_token(self) -> dict[str, object]:
+        kwargs: dict[str, object] = {
             "json": {
                 "appId": self._config.appid,
                 "clientSecret": self._config.secret,
@@ -89,13 +93,15 @@ class QQTokenProvider:
             "timeout": self._config.timeout_seconds,
         }
         if self._client is not None:
-            response = await self._client.post(self._config.token_url, **kwargs)
-        else:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(self._config.token_url, **kwargs)
+            return await self._client.post(self._config.token_url, **kwargs)
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise QQAuthError(f"qq token request failed: {exc}") from exc
-        return response
+        async with aiohttp.ClientSession() as client:
+            async with client.post(self._config.token_url, **kwargs) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise QQAuthError(
+                        f"qq token request failed: http={response.status} reason={response.reason}"
+                    )
+                payload = await response.json()
+                if not isinstance(payload, dict):
+                    raise QQAuthError(f"qq token response is not a JSON object: {payload!r}")
+                return payload

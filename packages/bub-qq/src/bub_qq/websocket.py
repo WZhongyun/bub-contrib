@@ -9,6 +9,7 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
+from .auth import QQAuthError
 from .config import QQConfig
 from .gateway import get_gateway
 from .gateway import get_shard_gateway
@@ -16,6 +17,7 @@ from .gateway import heartbeat_payload
 from .gateway import identify_payload
 from .gateway import resume_payload
 from .openapi import QQOpenAPI
+from .openapi_errors import QQOpenAPIError
 from .ws_errors import QQWebSocketFatalError
 from .ws_errors import raise_for_close_code
 
@@ -81,6 +83,13 @@ class QQWebSocketClient:
                 logger.warning("qq.websocket.invalid_session action=identify_from_scratch")
                 self._session_id = None
                 self._sequence = None
+            except (QQAuthError, QQOpenAPIError) as exc:
+                if _is_permanent_connect_error(exc):
+                    logger.error("qq.websocket.permanent_error error={}", exc)
+                    if self._stop_event is not None:
+                        self._stop_event.set()
+                    break
+                logger.warning("qq.websocket.error error={}", exc)
             except Exception as exc:
                 logger.warning("qq.websocket.error error={}", exc)
             if self._stop_event and self._stop_event.is_set():
@@ -228,3 +237,11 @@ class QQWebSocketReconnectRequested(RuntimeError):
 class QQWebSocketInvalidSession(RuntimeError):
     def __init__(self) -> None:
         super().__init__("qq websocket invalid session")
+
+
+def _is_permanent_connect_error(exc: QQAuthError | QQOpenAPIError) -> bool:
+    if isinstance(exc, QQAuthError):
+        return True
+    if exc.known is not None:
+        return not exc.known.retryable
+    return 400 <= exc.status_code < 500 and exc.status_code != 429

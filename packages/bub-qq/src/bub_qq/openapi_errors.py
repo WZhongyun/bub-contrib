@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-
-import httpx
+from typing import Protocol
 
 
 def _e(
@@ -54,6 +54,12 @@ class QQOpenAPIError(RuntimeError):
             parts.append(self.known.name)
         parts.append(self.error_message)
         return "qq openapi error: " + " ".join(parts)
+
+
+class ResponseLike(Protocol):
+    status: int
+    reason: str
+    headers: Mapping[str, str]
 
 
 HTTP_STATUS_DESCRIPTIONS: dict[int, str] = {
@@ -330,14 +336,14 @@ KNOWN_ERROR_RANGES: tuple[tuple[range, str, str, bool], ...] = (
 
 
 def build_openapi_error(
-    response: httpx.Response,
+    response: ResponseLike,
     payload: Any,
     *,
     default_message: str | None = None,
 ) -> QQOpenAPIError:
     error_code = extract_business_code(payload)
     known = lookup_known_error(error_code)
-    error_message = default_message or response.reason_phrase or http_status_description(response.status_code)
+    error_message = default_message or response.reason or http_status_description(response.status)
     if isinstance(payload, dict):
         message = payload.get("message") or payload.get("msg")
         if message:
@@ -348,7 +354,7 @@ def build_openapi_error(
         error_message = known.description
 
     return QQOpenAPIError(
-        status_code=response.status_code,
+        status_code=response.status,
         trace_id=trace_id_from_response(response),
         error_code=error_code,
         error_message=error_message,
@@ -357,7 +363,7 @@ def build_openapi_error(
     )
 
 
-def trace_id_from_response(response: httpx.Response) -> str | None:
+def trace_id_from_response(response: ResponseLike) -> str | None:
     trace_id = response.headers.get("X-Tps-trace-ID", "").strip()
     return trace_id or None
 
