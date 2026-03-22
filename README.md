@@ -38,6 +38,22 @@ Install all workspace dependencies:
 uv sync
 ```
 
+
+## Governance Model
+
+We encourage all plugin contributors to take responsibility for the ongoing maintenance of their submitted plugins. Each plugin should ideally have at least one active maintainer who is familiar with its domain and willing to respond to issues or update dependencies as needed.
+
+To foster a healthy and growing ecosystem, the code review standards for contributed plugins will be appropriately relaxed compared to core Bub repositories. We prioritize:
+
+- **Practicality and usefulness** over strict style or architectural perfection
+- **Clear ownership**: contributors are expected to respond to issues and PRs related to their plugins
+- **Basic safety and compatibility**: plugins should not break the workspace or introduce security risks
+
+We welcome experimental, niche, or work-in-progress plugins, as long as they are clearly documented and do not negatively impact other packages in this repository.
+
+If you are submitting a plugin, please be prepared to maintain it or help find a new maintainer if you become unavailable.
+
+---
 ## License
 
 This repository is licensed under [LICENSE](./LICENSE).
