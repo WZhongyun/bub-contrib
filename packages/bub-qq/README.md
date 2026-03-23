@@ -2,6 +2,20 @@
 
 QQ Open Platform channel adapter for `bub`.
 
+## Usage
+
+Install from the monorepo package directory during local development:
+
+```bash
+uv add --editable /path/to/bub-contrib/packages/bub-qq
+```
+
+Install directly from GitHub:
+
+```bash
+uv pip install "git+https://github.com/bubbuild/bub-contrib.git#subdirectory=packages/bub-qq"
+```
+
 ## Official Documentation
 
 For QQ bot setup, application creation, credential management, and API details, see the official QQ Bot documentation:
@@ -19,9 +33,9 @@ QQ currently treats Webhook and WebSocket callbacks as mutually exclusive receiv
 
 ## Status
 
-This package is under active integration.
+This package currently provides a working QQ Open Platform channel integration for Bub, focused on C2C message receive and reply flows.
 
-Implemented today:
+Current coverage:
 
 - QQ Open Platform config loading via `BUB_QQ_*` environment variables
 - Access token acquisition from `https://bots.qq.com/app/getAppAccessToken`
@@ -42,11 +56,12 @@ Implemented today:
 - WebSocket shard orchestration using `/gateway/bot` recommended shard count
 - Per-shard websocket session state for reconnect and resume
 - Identify pacing based on `session_start_limit.max_concurrency`
+- Automated test coverage for config, auth, signatures, channel behavior, webhook flow, websocket flow, gateway handling, and C2C services
 
-Not implemented yet:
+Current limitations:
 
 - QQ group / channel / DM send APIs
-- Full event-specific webhook acknowledgement handling beyond basic `{"op":12}` receive acknowledgement
+- Broader webhook event coverage beyond validation and the current basic `{"op":12}` acknowledgement flow
 - Group and other QQ event types
 - Dynamic shard rebalancing or in-process shard-count refresh after startup
 
