@@ -56,7 +56,11 @@ def test_resolve_shard_specs_uses_gateway_endpoint_when_unsharded() -> None:
                 }
             }
         )
-        client = QQWebSocketClient(QQConfig(), openapi, _on_payload)  # type: ignore[arg-type]
+        client = QQWebSocketClient(
+            QQConfig(receive_mode="websocket"),
+            openapi,
+            _on_payload,
+        )  # type: ignore[arg-type]
 
         specs = await client._resolve_shard_specs()
 
@@ -85,7 +89,7 @@ def test_resolve_shard_specs_creates_one_worker_per_recommended_shard() -> None:
             }
         )
         client = QQWebSocketClient(
-            QQConfig(websocket_use_shard_gateway=True),
+            QQConfig(receive_mode="websocket", websocket_use_shard_gateway=True),
             openapi,
             _on_payload,
         )  # type: ignore[arg-type]
@@ -103,7 +107,7 @@ def test_identify_uses_current_shard_index_and_total() -> None:
     async def _run() -> None:
         openapi = OpenAPIStub()
         client = QQWebSocketClient(
-            QQConfig(websocket_use_shard_gateway=True),
+            QQConfig(receive_mode="websocket", websocket_use_shard_gateway=True),
             openapi,
             _on_payload,
         )  # type: ignore[arg-type]
@@ -144,7 +148,7 @@ def test_identify_rate_limit_waits_for_next_window() -> None:
     async def _run() -> None:
         clock = ManualClock()
         client = QQWebSocketClient(
-            QQConfig(),
+            QQConfig(receive_mode="websocket"),
             OpenAPIStub(),
             _on_payload,
             monotonic=clock.monotonic,

@@ -119,7 +119,12 @@ def test_token_provider_caches_until_refresh_boundary() -> None:
 
         clock = Clock()
         provider = QQTokenProvider(
-            QQConfig(appid="app", secret="secret", token_refresh_skew_seconds=60),
+            QQConfig(
+                appid="app",
+                secret="secret",
+                receive_mode="webhook",
+                token_refresh_skew_seconds=60,
+            ),
             client=FakeTokenClient(handler),
             clock=clock,
         )
@@ -153,10 +158,14 @@ def test_openapi_adds_authorization_header() -> None:
             )
 
         provider = QQTokenProvider(
-            QQConfig(appid="app", secret="secret"),
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
             client=FakeTokenClient(token_handler),
         )
-        openapi = QQOpenAPI(QQConfig(), provider, client=FakeOpenAPIClient(openapi_handler))
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
 
         payload = await openapi.post("/test", json_body={"ping": "pong"})
 
@@ -184,10 +193,14 @@ def test_openapi_posts_c2c_text_message() -> None:
             )
 
         provider = QQTokenProvider(
-            QQConfig(appid="app", secret="secret"),
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
             client=FakeTokenClient(token_handler),
         )
-        openapi = QQOpenAPI(QQConfig(), provider, client=FakeOpenAPIClient(openapi_handler))
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
 
         payload = await openapi.post_c2c_text_message(
             openid="user-openid",
@@ -227,10 +240,14 @@ def test_openapi_error_exposes_trace_id_and_business_code() -> None:
             )
 
         provider = QQTokenProvider(
-            QQConfig(appid="app", secret="secret"),
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
             client=FakeTokenClient(token_handler),
         )
-        openapi = QQOpenAPI(QQConfig(), provider, client=FakeOpenAPIClient(openapi_handler))
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
 
         try:
             await openapi.post("/test", json_body={"ping": "pong"})

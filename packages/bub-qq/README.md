@@ -2,6 +2,21 @@
 
 QQ Open Platform channel adapter for `bub`.
 
+## Official Documentation
+
+For QQ bot setup, application creation, credential management, and API details, see the official QQ Bot documentation:
+
+- [QQ Bot Developer Documentation](https://bot.q.qq.com/wiki/develop/api-v2/)
+
+You will typically need the official docs to locate or configure:
+
+- `APPID`
+- `SECRET`
+- Event subscription and callback settings
+- WebSocket and OpenAPI behavior
+
+QQ currently treats Webhook and WebSocket callbacks as mutually exclusive receive modes. According to the QQ bot configuration page, after a valid HTTPS callback URL is configured successfully, WebSocket callback delivery is no longer supported. This plugin therefore requires an explicit `BUB_QQ_RECEIVE_MODE` so runtime behavior matches the platform-side configuration.
+
 ## Status
 
 This package is under active integration.
@@ -37,7 +52,7 @@ Not implemented yet:
 
 ## Confirmed Interface Rules
 
-Based on the official QQ Bot docs for "接口调用与鉴权":
+Based on the official QQ Bot docs for "API Calls and Authentication":
 
 - Token endpoint: `POST https://bots.qq.com/app/getAppAccessToken`
 - Request body fields: `appId`, `clientSecret`
@@ -47,10 +62,11 @@ Based on the official QQ Bot docs for "接口调用与鉴权":
 - Required auth header for OpenAPI requests: `Authorization: QQBot {ACCESS_TOKEN}`
 - OpenAPI trace header: `X-Tps-trace-ID`
 
-Based on the official QQ Bot docs for "事件订阅与通知":
+Based on the official QQ Bot docs for "Event Subscription and Notifications":
 
 - Webhook callbacks must use HTTPS in production
 - Allowed callback ports are `80`, `443`, `8080`, `8443`
+- After a valid HTTPS callback URL is configured successfully, WebSocket callback delivery is no longer supported
 - Validation requests arrive with `op = 13`
 - Validation response must include `plain_token` and an ed25519 signature over `event_ts + plain_token`
 - Normal webhook requests are verified against `timestamp + raw_body`
@@ -71,6 +87,12 @@ Required:
 
 - `BUB_QQ_APPID`: QQ bot app ID
 - `BUB_QQ_SECRET`: QQ bot secret
+- `BUB_QQ_RECEIVE_MODE`: inbound transport mode, must be `webhook` or `websocket`
+
+`BUB_QQ_RECEIVE_MODE` controls which receive transport the plugin starts:
+
+- `webhook`: starts the embedded webhook server only; WebSocket is not started
+- `websocket`: starts the WebSocket client only; the embedded webhook server is not started
 
 Optional:
 
@@ -78,9 +100,8 @@ Optional:
 - `BUB_QQ_OPENAPI_BASE_URL`: override OpenAPI base URL if needed; defaults to `https://api.sgroup.qq.com`
 - `BUB_QQ_TIMEOUT_SECONDS`: HTTP timeout for token and OpenAPI requests; defaults to `30`
 - `BUB_QQ_TOKEN_REFRESH_SKEW_SECONDS`: token refresh lead time; defaults to `60`
-- `BUB_QQ_RECEIVE_MODE`: `webhook` or `websocket`; defaults to `webhook`
 - `BUB_QQ_WEBHOOK_HOST`: embedded webhook bind host; defaults to `127.0.0.1`
-- `BUB_QQ_WEBHOOK_PORT`: embedded webhook bind port; defaults to `9009`
+- `BUB_QQ_WEBHOOK_PORT`: embedded webhook bind port; defaults to `8080`. QQ currently allows callback ports `80`, `443`, `8080`, and `8443`
 - `BUB_QQ_WEBHOOK_PATH`: webhook path; defaults to `/qq/webhook`
 - `BUB_QQ_WEBHOOK_CALLBACK_TIMEOUT_SECONDS`: reserved for future callback handling controls; defaults to `15`
 - `BUB_QQ_VERIFY_SIGNATURE`: whether to enforce webhook request signature validation; defaults to `true`

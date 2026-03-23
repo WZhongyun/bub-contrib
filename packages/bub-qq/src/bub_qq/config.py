@@ -19,9 +19,12 @@ class QQConfig(BaseSettings):
     openapi_base_url: str = "https://api.sgroup.qq.com"
     timeout_seconds: float = 30.0
     token_refresh_skew_seconds: int = 60
-    receive_mode: str = "webhook"
+    receive_mode: str = Field(
+        ...,
+        description="QQ inbound transport mode. Must be set to 'webhook' or 'websocket'.",
+    )
     webhook_host: str = "127.0.0.1"
-    webhook_port: int = 9009
+    webhook_port: int = 8080
     webhook_path: str = "/qq/webhook"
     webhook_callback_timeout_seconds: float = 15.0
     verify_signature: bool = True

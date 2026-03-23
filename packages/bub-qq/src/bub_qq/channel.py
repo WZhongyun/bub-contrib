@@ -64,7 +64,7 @@ class QQChannel(Channel):
         if mode == "webhook":
             await self._webhook.start()
             logger.info(
-                "qq.start mode=webhook token_url={} openapi_base_url={} webhook=http://{}:{}{}",
+                "qq.start mode=webhook token_url={} openapi_base_url={} webhook=http://{}:{}{} websocket=disabled",
                 self._config.token_url,
                 self._config.openapi_base_url,
                 self._config.webhook_host,
@@ -75,7 +75,7 @@ class QQChannel(Channel):
 
         await self._websocket.start(stop_event)
         logger.info(
-            "qq.start mode=websocket token_url={} openapi_base_url={} intents={}",
+            "qq.start mode=websocket token_url={} openapi_base_url={} intents={} webhook=disabled",
             self._config.token_url,
             self._config.openapi_base_url,
             self._config.websocket_intents,

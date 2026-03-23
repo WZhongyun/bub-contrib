@@ -13,7 +13,7 @@ def test_schedule_payload_runs_callback_on_loop() -> None:
         async def on_payload(payload: dict[str, object]) -> None:
             received.append(payload)
 
-        server = QQWebhookServer(QQConfig(secret="secret"), on_payload)
+        server = QQWebhookServer(QQConfig(secret="secret", receive_mode="webhook"), on_payload)
         server._loop = asyncio.get_running_loop()
 
         payload = {"op": 0, "t": "C2C_MESSAGE_CREATE", "d": {"id": "event-1"}}
@@ -29,7 +29,7 @@ def test_schedule_payload_requires_running_loop() -> None:
     async def on_payload(payload: dict[str, object]) -> None:
         del payload
 
-    server = QQWebhookServer(QQConfig(secret="secret"), on_payload)
+    server = QQWebhookServer(QQConfig(secret="secret", receive_mode="webhook"), on_payload)
 
     try:
         server._schedule_payload({"op": 0})
@@ -45,7 +45,10 @@ def test_log_callback_result_swallows_handler_errors() -> None:
         future: asyncio.Future[None] = loop.create_future()
         future.set_exception(RuntimeError("boom"))
 
-        server = QQWebhookServer(QQConfig(secret="secret"), lambda payload: _noop(payload))
+        server = QQWebhookServer(
+            QQConfig(secret="secret", receive_mode="webhook"),
+            lambda payload: _noop(payload),
+        )
         server._log_callback_result(future, op=0, event_type="C2C_MESSAGE_CREATE")
     finally:
         loop.close()
