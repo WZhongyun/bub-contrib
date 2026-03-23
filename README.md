@@ -17,6 +17,7 @@ Contrib packages for the `bub` ecosystem.
 | `packages/bub-web-search`           | `web-search`           | Provides a `web.search` tool backed by the Ollama web search API. Registers the tool only when `BUB_SEARCH_OLLAMA_API_KEY` is configured. |
 | `packages/bub-feishu`               | `feishu`               | Provides a Feishu channel adapter for Bub message IO.                                                                                     |
 | `packages/bub-session-prompt`       | `session-prompt`       | Provides a session-specific system prompt sourced from `~/.bub/sessions/<session_id>/AGENTS.md`.                                          |
+| `packages/bub-wechat`               | `wechat`               | Provides a WeChat channel adapter for Bub message IO.                                                                                     |
 
 ## Prerequisites
 
@@ -39,6 +40,22 @@ Install all workspace dependencies:
 uv sync
 ```
 
+
+## Governance Model
+
+We encourage all plugin contributors to take responsibility for the ongoing maintenance of their submitted plugins. Each plugin should ideally have at least one active maintainer who is familiar with its domain and willing to respond to issues or update dependencies as needed.
+
+To foster a healthy and growing ecosystem, the code review standards for contributed plugins will be appropriately relaxed compared to core Bub repositories. We prioritize:
+
+- **Practicality and usefulness** over strict style or architectural perfection
+- **Clear ownership**: contributors are expected to respond to issues and PRs related to their plugins
+- **Basic safety and compatibility**: plugins should not break the workspace or introduce security risks
+
+We welcome experimental, niche, or work-in-progress plugins, as long as they are clearly documented and do not negatively impact other packages in this repository.
+
+If you are submitting a plugin, please be prepared to maintain it or help find a new maintainer if you become unavailable.
+
+---
 ## License
 
 This repository is licensed under [LICENSE](./LICENSE).

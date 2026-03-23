@@ -17,10 +17,12 @@ members = [
     "bub-qq",
     "bub-schedule",
     "bub-session-prompt",
+    "bub-tapestore-redis",
     "bub-tapestore-sqlalchemy",
     "bub-tapestore-sqlite",
     "bub-tg-feed",
     "bub-web-search",
+    "bub-wechat",
 ]
 
 [[package]]
@@ -328,9 +330,10 @@ wheels = [
 
 [[package]]
 name = "bub"
-version = "0.3.0a1"
-source = { git = "https://github.com/bubbuild/bub.git#3ef6ad304a5a0507f60f81858eeb6b8ed2e26ab8" }
+version = "0.3.0"
+source = { git = "https://github.com/bubbuild/bub.git#e80e5e699b7f8d16722010fc2c13bf530391111e" }
 dependencies = [
+    { name = "aiohttp" },
     { name = "any-llm-sdk", extra = ["anthropic"] },
     { name = "loguru" },
     { name = "pluggy" },
@@ -363,10 +366,12 @@ dependencies = [
     { name = "bub-qq" },
     { name = "bub-schedule" },
     { name = "bub-session-prompt" },
+    { name = "bub-tapestore-redis" },
     { name = "bub-tapestore-sqlalchemy" },
     { name = "bub-tapestore-sqlite" },
     { name = "bub-tg-feed" },
     { name = "bub-web-search" },
+    { name = "bub-wechat" },
 ]
 
 [package.metadata]
@@ -379,10 +384,12 @@ requires-dist = [
     { name = "bub-qq", editable = "packages/bub-qq" },
     { name = "bub-schedule", editable = "packages/bub-schedule" },
     { name = "bub-session-prompt", editable = "packages/bub-session-prompt" },
+    { name = "bub-tapestore-redis", editable = "packages/bub-tapestore-redis" },
     { name = "bub-tapestore-sqlalchemy", editable = "packages/bub-tapestore-sqlalchemy" },
     { name = "bub-tapestore-sqlite", editable = "packages/bub-tapestore-sqlite" },
     { name = "bub-tg-feed", editable = "packages/bub-tg-feed" },
     { name = "bub-web-search", editable = "packages/bub-web-search" },
+    { name = "bub-wechat", editable = "packages/bub-wechat" },
 ]
 
 [[package]]
@@ -462,6 +469,23 @@ version = "0.1.0"
 source = { editable = "packages/bub-session-prompt" }
 
 [[package]]
+name = "bub-tapestore-redis"
+version = "0.1.0"
+source = { editable = "packages/bub-tapestore-redis" }
+dependencies = [
+    { name = "pydantic-settings" },
+    { name = "redis" },
+    { name = "republic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic-settings" },
+    { name = "redis", specifier = ">=6.0.0" },
+    { name = "republic", specifier = ">=0.5.4" },
+]
+
+[[package]]
 name = "bub-tapestore-sqlalchemy"
 version = "0.1.0"
 source = { editable = "packages/bub-tapestore-sqlalchemy" }
@@ -510,6 +534,17 @@ requires-dist = [
 name = "bub-web-search"
 version = "0.1.0"
 source = { editable = "packages/bub-web-search" }
+
+[[package]]
+name = "bub-wechat"
+version = "0.1.0"
+source = { editable = "packages/bub-wechat" }
+dependencies = [
+    { name = "weixin-bot-sdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "weixin-bot-sdk", specifier = ">=0.2.0" }]
 
 [[package]]
 name = "certifi"
@@ -1567,8 +1602,17 @@ wheels = [
 ]
 
 [[package]]
+name = "redis"
+version = "7.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/82/4d1a5279f6c1251d3d2a603a798a1137c657de9b12cfc1fba4858232c4d2/redis-7.3.0.tar.gz", hash = "sha256:4d1b768aafcf41b01022410b3cc4f15a07d9b3d6fe0c66fc967da2c88e551034", size = 4928081, upload-time = "2026-03-06T18:18:16.287Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f0/28/84e57fce7819e81ec5aa1bd31c42b89607241f4fb1a3ea5b0d2dbeaea26c/redis-7.3.0-py3-none-any.whl", hash = "sha256:9d4fcb002a12a5e3c3fbe005d59c48a2cc231f87fbb2f6b70c2d89bb64fec364", size = 404379, upload-time = "2026-03-06T18:18:14.583Z" },
+]
+
+[[package]]
 name = "republic"
-version = "0.5.4"
+version = "0.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "any-llm-sdk" },
@@ -1576,9 +1620,9 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/4c/f0d776d498f4ed6e92c2e26f6bd99e5b4395961cdbc567668e6cf67e96f5/republic-0.5.4.tar.gz", hash = "sha256:1a1870d75933d7c05d7abee09172c3b3c7473a5c65a52aaf25c161d034f440d9", size = 132388, upload-time = "2026-03-09T04:40:44.819Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/51/bf/af1bbec4eed4ce52283cc915f534ef0563925e25552f0a1b79fd93223745/republic-0.5.6.tar.gz", hash = "sha256:1ab2ef1346d1b8115cb8a05456a9ef458533b0da20334c214247d3ee34989b9b", size = 141206, upload-time = "2026-03-16T10:26:54.602Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/d1/e54222cb7916a6844df6edd5f054d143fb0c9cf2c0b0b4973d7f241c3ace/republic-0.5.4-py3-none-any.whl", hash = "sha256:04699f629dd023e411ffd0143c558f8ba695c8831c705eff647f81e8c5a8f38a", size = 57941, upload-time = "2026-03-09T04:40:47.08Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/ec/ca9495c023c0a0b871daf41b4ad5661bbe58aa50550872301531adebf8df/republic-0.5.6-py3-none-any.whl", hash = "sha256:da075d28897fe1e26d358e5633fa3d4dde9207aa4c1523e3f71001d3fc610f83", size = 62264, upload-time = "2026-03-16T10:26:55.561Z" },
 ]
 
 [[package]]
@@ -1827,6 +1871,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/b6/b9afed2afadddaf5ebb2afa801abf4b0868f42f8539bfe4b071b5266c9fe/websockets-16.0-cp314-cp314t-win32.whl", hash = "sha256:5a4b4cc550cb665dd8a47f868c8d04c8230f857363ad3c9caf7a0c3bf8c61ca6", size = 178085, upload-time = "2026-01-10T09:23:33.816Z" },
     { url = "https://files.pythonhosted.org/packages/9f/3e/28135a24e384493fa804216b79a6a6759a38cc4ff59118787b9fb693df93/websockets-16.0-cp314-cp314t-win_amd64.whl", hash = "sha256:b14dc141ed6d2dde437cddb216004bcac6a1df0935d79656387bd41632ba0bbd", size = 178531, upload-time = "2026-01-10T09:23:35.016Z" },
     { url = "https://files.pythonhosted.org/packages/6f/28/258ebab549c2bf3e64d2b0217b973467394a9cea8c42f70418ca2c5d0d2e/websockets-16.0-py3-none-any.whl", hash = "sha256:1637db62fad1dc833276dded54215f2c7fa46912301a24bd94d45d46a011ceec", size = 171598, upload-time = "2026-01-10T09:23:45.395Z" },
+]
+
+[[package]]
+name = "weixin-bot-sdk"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3c/f5/9e14d92674be756fc2436609d9ffc997a52467608e1921bcb60d51f0d108/weixin_bot_sdk-0.2.0.tar.gz", hash = "sha256:5b87faa42e82c7b195350447db32029c157e2a7064864f9a0881d70d38627cae", size = 10359, upload-time = "2026-03-22T06:02:30.163Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/44/f55830a0a6fd2d771b6cbab1fe7512c5f9048eb4a393a34bb397c0da0363/weixin_bot_sdk-0.2.0-py3-none-any.whl", hash = "sha256:3fbb50b9140c33ce4282e68047361153ff781cf7a018e34ae71dd71cb9077904", size = 10625, upload-time = "2026-03-22T06:02:28.914Z" },
 ]
 
 [[package]]

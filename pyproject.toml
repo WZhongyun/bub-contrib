@@ -12,11 +12,13 @@ dependencies = [
     "bub-qq",
     "bub-schedule",
     "bub-tapestore-sqlalchemy",
+    "bub-tapestore-redis",
     "bub-tapestore-sqlite",
     "bub-tg-feed",
     "bub-web-search",
     "bub-feishu",
     "bub-session-prompt",
+    "bub-wechat",
 ]
 
 [tool.uv.workspace]
@@ -31,7 +33,9 @@ bub-dingtalk = { workspace = true }
 bub-qq = { workspace = true }
 bub-schedule = { workspace = true }
 bub-tapestore-sqlalchemy = { workspace = true }
+bub-tapestore-redis = { workspace = true }
 bub-tapestore-sqlite = { workspace = true }
 bub-web-search = { workspace = true }
 bub-feishu = { workspace = true }
 bub-session-prompt = { workspace = true }
+bub-wechat = { workspace = true }
