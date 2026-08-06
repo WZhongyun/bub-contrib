@@ -4,7 +4,7 @@ import asyncio
 
 from bub.framework import BubFramework
 
-from bub_acp_server.plugin import run_acp_agent
+from bub_acp_server.agent import run_acp_agent
 
 
 def main() -> None:

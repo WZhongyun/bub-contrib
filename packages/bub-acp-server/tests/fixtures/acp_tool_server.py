@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import json
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, cast
+
+from bub.model_selection import ModelOptions
+from bub.streaming import StreamEvent
+from bub.tools import REGISTRY, ToolContext
+from bub.turn import TurnResult
+
+from bub_acp_server.agent import run_acp_agent
+
+
+class E2EFramework:
+    def __init__(self) -> None:
+        self.workspace = Path(os.environ["BUB_ACP_E2E_WORKSPACE"]).resolve()
+        self._channel_router: Any = None
+
+    @asynccontextmanager
+    async def running(self):
+        yield
+
+    def bind_channel_router(self, router: Any) -> None:
+        self._channel_router = router
+
+    async def quit_via_channel_router(self, session_id: str) -> None:
+        del session_id
+
+    async def get_model_options(
+        self, *, session_id: str, workspace: Path
+    ) -> ModelOptions:
+        del session_id, workspace
+        return ModelOptions()
+
+    async def process_inbound(
+        self, inbound: Any, stream_output: bool = False
+    ) -> TurnResult:
+        assert stream_output is True
+        context = ToolContext(
+            tape=cast(Any, object()),
+            state={
+                "session_id": inbound.session_id,
+                "_runtime_workspace": str(self.workspace),
+            },
+        )
+        read_result = await REGISTRY["fs.read"].run(
+            path="target.txt", offset=1, limit=1, context=context
+        )
+        write_result = await REGISTRY["fs.write"].run(
+            path="created.txt", content="created by ACP", context=context
+        )
+        edit_result = await REGISTRY["fs.edit"].run(
+            path="target.txt",
+            old="old value",
+            new="new value",
+            start=1,
+            context=context,
+        )
+        bash_result = await REGISTRY["bash"].run(
+            cmd="printf e2e-command", context=context
+        )
+        model_output = json.dumps(
+            {
+                "read": read_result,
+                "write": write_result,
+                "edit": edit_result,
+                "bash": bash_result,
+            },
+            sort_keys=True,
+        )
+
+        async def stream():
+            yield StreamEvent("text", {"delta": model_output})
+            yield StreamEvent("final", {"text": model_output, "ok": True})
+
+        async for _ in self._channel_router.wrap_stream(inbound, stream()):
+            pass
+        return TurnResult(
+            session_id=inbound.session_id,
+            prompt=inbound.content,
+            model_output=model_output,
+        )
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(run_acp_agent(E2EFramework()))

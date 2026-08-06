@@ -10,8 +10,9 @@ from bub.streaming import StreamEvent
 from bub.tape import TapeEntry, TapeQuery
 from bub.turn import TurnResult
 
+from bub_acp_server import agent as agent_module
 from bub_acp_server import plugin
-from bub_acp_server.plugin import BubACPAgent
+from bub_acp_server.agent import BubACPAgent
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +28,6 @@ class FakeClient:
         self, session_id: str, update: object, **kwargs: Any
     ) -> None:
         self.updates.append((session_id, update))
-
 
 class FakeFramework:
     def __init__(self) -> None:
@@ -205,7 +205,7 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
 
     assert response is not None
     assert framework.tape_store.queries == [
-        plugin._session_tape_name(session_id, tmp_path)
+        agent_module._session_tape_name(session_id, tmp_path)
     ]
     update_names = [update.session_update for _, update in client.updates]
     assert update_names == [
@@ -288,7 +288,7 @@ async def test_set_config_option_updates_session_runtime_and_returns_config_opti
 def test_model_options_fall_back_when_persisted_model_is_unavailable(
     tmp_path: Path,
 ) -> None:
-    session = plugin.ACPSession(
+    session = agent_module.ACPSession(
         session_id="session",
         cwd=tmp_path,
         runtime={"model": "removed:model"},
@@ -298,7 +298,7 @@ def test_model_options_fall_back_when_persisted_model_is_unavailable(
         current_model="available:model",
     )
 
-    config_options = plugin._model_options_to_acp_config_options(options, session)
+    config_options = agent_module._model_options_to_acp_config_options(options, session)
 
     assert config_options[0].current_value == "available:model"
 
@@ -361,7 +361,7 @@ async def test_run_acp_agent_registers_resume_routes_by_default(
         captured["agent"] = agent
         captured["use_unstable_protocol"] = use_unstable_protocol
 
-    monkeypatch.setattr(plugin, "run_agent", fake_run_agent)
+    monkeypatch.setattr(agent_module, "run_agent", fake_run_agent)
 
     await plugin.run_acp_agent(RunningFramework())
 
