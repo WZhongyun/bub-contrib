@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Generator
+from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
@@ -23,18 +23,29 @@ _TOOL_NAMES = (
     "fs.write",
     "fs.edit",
 )
+type TerminalObserver = Callable[[str, str], Awaitable[None]]
 
 
 class ACPClientToolRuntime:
     def __init__(self) -> None:
         self._client: Client | None = None
         self._capabilities = ClientCapabilities()
+        self._terminal_observer: TerminalObserver | None = None
 
     def connect(self, client: Client) -> None:
         self._client = client
 
     def set_capabilities(self, capabilities: ClientCapabilities | None) -> None:
         self._capabilities = capabilities or ClientCapabilities()
+
+    @contextmanager
+    def observe_terminals(self, observer: TerminalObserver) -> Generator[None]:
+        previous_observer = self._terminal_observer
+        self._terminal_observer = observer
+        try:
+            yield
+        finally:
+            self._terminal_observer = previous_observer
 
     async def read_file(
         self,
@@ -84,6 +95,7 @@ class ACPClientToolRuntime:
     ) -> str:
         resolved_path = _resolve_path(context, path)
         text = await self.read_file(path, 0, None, context)
+        trailing_newline = text.endswith("\n")
         lines = text.splitlines()
         previous = "\n".join(lines[:start])
         to_replace = "\n".join(lines[start:])
@@ -92,6 +104,8 @@ class ACPClientToolRuntime:
         replaced = to_replace.replace(old, new)
         if previous:
             replaced = previous + "\n" + replaced
+        if trailing_newline:
+            replaced += "\n"
         await self.write_file(path, replaced, context)
         return f"edited: {resolved_path}"
 
@@ -112,6 +126,8 @@ class ACPClientToolRuntime:
             cwd=str(target_cwd),
             session_id=session_id,
         )
+        if self._terminal_observer is not None:
+            await self._terminal_observer(cmd, terminal.terminal_id)
         if background:
             return f"started: {terminal.terminal_id}"
 

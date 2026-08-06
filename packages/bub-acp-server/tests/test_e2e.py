@@ -42,7 +42,10 @@ class E2EClient:
         lines = self.files[path].splitlines()
         start = max(0, (line or 1) - 1)
         end = len(lines) if limit is None else start + limit
-        return ReadTextFileResponse(content="\n".join(lines[start:end]))
+        content = "\n".join(lines[start:end])
+        if end >= len(lines) and self.files[path].endswith("\n"):
+            content += "\n"
+        return ReadTextFileResponse(content=content)
 
     async def write_text_file(
         self,
@@ -111,9 +114,7 @@ async def test_acp_prompt_executes_bub_tools_through_client(tmp_path: Path) -> N
     workspace.mkdir()
     target_path = workspace / "target.txt"
     created_path = workspace / "created.txt"
-    client = E2EClient(
-        {str(target_path): "before\nold value\nafter\n"}
-    )
+    client = E2EClient({str(target_path): "before\nold value\nafter\n"})
     server_script = Path(__file__).parent / "fixtures" / "acp_tool_server.py"
 
     async with spawn_agent_process(
@@ -149,7 +150,7 @@ async def test_acp_prompt_executes_bub_tools_through_client(tmp_path: Path) -> N
         str(target_path),
     ]
     assert client.files[str(created_path)] == "created by ACP"
-    assert client.files[str(target_path)] == "before\nnew value\nafter"
+    assert client.files[str(target_path)] == "before\nnew value\nafter\n"
     assert client.create_requests == [
         {
             "command": "bash",
@@ -169,3 +170,8 @@ async def test_acp_prompt_executes_bub_tools_through_client(tmp_path: Path) -> N
     assert payload["bash"] == "e2e-command"
     assert payload["write"] == f"wrote: {created_path}"
     assert payload["edit"] == f"edited: {target_path}"
+
+    usage_update = client.session_updates[-1][1]
+    assert usage_update.session_update == "usage_update"
+    assert usage_update.used == 34
+    assert usage_update.size == 128_000

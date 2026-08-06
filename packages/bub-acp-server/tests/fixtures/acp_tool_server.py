@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from bub.model_selection import ModelOptions
-from bub.streaming import StreamEvent
+from bub.streaming import AsyncStreamEvents, StreamEvent, StreamState
 from bub.tools import REGISTRY, ToolContext
 from bub.turn import TurnResult
 
@@ -76,7 +76,13 @@ class E2EFramework:
             yield StreamEvent("text", {"delta": model_output})
             yield StreamEvent("final", {"text": model_output, "ok": True})
 
-        async for _ in self._channel_router.wrap_stream(inbound, stream()):
+        events = AsyncStreamEvents(
+            stream(),
+            state=StreamState(
+                usage={"prompt_tokens": 21, "completion_tokens": 13}
+            ),
+        )
+        async for _ in self._channel_router.wrap_stream(inbound, events):
             pass
         return TurnResult(
             session_id=inbound.session_id,

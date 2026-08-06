@@ -22,7 +22,12 @@ from acp import (
     update_user_message,
     update_user_message_text,
 )
-from acp.helpers import start_tool_call, tool_content, update_tool_call
+from acp.helpers import (
+    start_tool_call,
+    tool_content,
+    tool_terminal_ref,
+    update_tool_call,
+)
 from acp.interfaces import Client
 from acp.schema import (
     AgentCapabilities,
@@ -52,6 +57,7 @@ from acp.schema import (
     SseMcpServer,
     TextContentBlock,
     ToolKind,
+    UsageUpdate,
 )
 from bub.channels.contracts import ChannelRouter
 from bub.channels.message import ChannelMessage, MediaItem, MediaType
@@ -153,11 +159,20 @@ class ACPStreamRouter:
         self._client = client
         self._session_id = session_id
         self._tool_ids: dict[int, str] = {}
+        self._pending_tool_indices: list[int] = []
+        self._pending_terminal_calls: list[tuple[str | None, int]] = []
+        self._terminal_tool_indices: set[int] = set()
+        self._next_tool_index = 0
         self._sent_text = False
+        self._usage: Mapping[str, object] | None = None
 
     @property
     def sent_text(self) -> bool:
         return self._sent_text
+
+    @property
+    def usage(self) -> Mapping[str, object] | None:
+        return self._usage
 
     def wrap_stream(
         self, message: Envelope, stream: AsyncIterable[StreamEvent]
@@ -165,9 +180,14 @@ class ACPStreamRouter:
         del message
 
         async def iterator() -> AsyncIterator[StreamEvent]:
-            async for event in stream:
-                await self._publish_stream_event(event)
-                yield event
+            try:
+                async for event in stream:
+                    await self._publish_stream_event(event)
+                    yield event
+            finally:
+                usage = getattr(stream, "usage", None)
+                if isinstance(usage, Mapping):
+                    self._usage = usage
 
         return iterator()
 
@@ -190,9 +210,9 @@ class ACPStreamRouter:
             if delta:
                 await self._send_user_text(delta)
         elif event.kind == "tool_call":
-            await self._send_tool_call(event.data)
+            await self._send_tool_calls(event.data)
         elif event.kind == "tool_result":
-            await self._send_tool_result(event.data)
+            await self._send_tool_results(event.data)
         elif event.kind == "error":
             message = (
                 event.data.get("message") or event.data.get("error") or "unknown error"
@@ -213,34 +233,97 @@ class ACPStreamRouter:
             self._session_id, update_user_message_text(text)
         )
 
-    async def _send_tool_call(self, data: StreamPayload) -> None:
-        index = _int_value(data.get("index"), default=len(self._tool_ids))
+    async def _send_tool_calls(self, data: StreamPayload) -> None:
+        self._pending_terminal_calls = []
+        if "tool_calls" not in data:
+            index = await self._send_tool_call(data)
+            self._pending_tool_indices = [index]
+            return
+
+        calls = _list_payload(data.get("tool_calls"))
+        self._pending_tool_indices = []
+        for call in calls:
+            index = await self._send_tool_call({"call": call})
+            self._pending_tool_indices.append(index)
+
+    async def _send_tool_call(self, data: StreamPayload) -> int:
+        index = _int_value(data.get("index"), default=self._next_tool_index)
+        self._next_tool_index = max(self._next_tool_index, index + 1)
         call = data.get("call")
         tool_id = _tool_call_id(index, call)
         self._tool_ids[index] = tool_id
+        tool_name = _tool_name(call)
         title = _tool_title(call)
+        if tool_name == "bash":
+            self._pending_terminal_calls.append((_tool_command(call), index))
         await self._client.session_update(
             self._session_id,
             start_tool_call(
                 tool_id,
                 title,
-                kind=_tool_kind(title),
+                kind=_tool_kind(tool_name),
                 status="in_progress",
-                raw_input=call,
+                raw_input=_tool_raw_input(call),
             ),
         )
+        return index
+
+    async def attach_terminal(self, command: str, terminal_id: str) -> None:
+        if not self._pending_terminal_calls:
+            return
+
+        position = next(
+            (
+                position
+                for position, (pending_command, _) in enumerate(
+                    self._pending_terminal_calls
+                )
+                if pending_command == command
+            ),
+            0,
+        )
+        _, index = self._pending_terminal_calls.pop(position)
+        tool_id = self._tool_ids[index]
+        self._terminal_tool_indices.add(index)
+        await self._client.session_update(
+            self._session_id,
+            update_tool_call(
+                tool_id,
+                status="in_progress",
+                content=[tool_terminal_ref(terminal_id)],
+            ),
+        )
+
+    async def _send_tool_results(self, data: StreamPayload) -> None:
+        if "tool_results" not in data:
+            await self._send_tool_result(data)
+            self._pending_tool_indices = []
+            return
+
+        results = _list_payload(data.get("tool_results"))
+        for position, result in enumerate(results):
+            if position < len(self._pending_tool_indices):
+                index = self._pending_tool_indices[position]
+            else:
+                index = self._next_tool_index
+                self._next_tool_index += 1
+            await self._send_tool_result({"index": index, "result": result})
+        self._pending_tool_indices = []
 
     async def _send_tool_result(self, data: StreamPayload) -> None:
         index = _int_value(data.get("index"), default=0)
         tool_id = self._tool_ids.get(index, f"tool-{index}")
         result = data.get("result")
+        content = None
+        if index not in self._terminal_tool_indices:
+            content = [tool_content(text_block(_stringify(result)))]
         await self._client.session_update(
             self._session_id,
             update_tool_call(
                 tool_id,
                 status="completed",
                 raw_output=result,
-                content=[tool_content(text_block(_stringify(result)))],
+                content=content,
             ),
         )
 
@@ -423,9 +506,7 @@ class BubACPAgent:
         if self.settings.send_user_message_updates:
             await self._send_user_message_updates(prompt, session_id)
 
-        result = await self._process_inbound_with_streaming(inbound, session, client)
-        if not result.model_output:
-            return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
+        await self._process_inbound_with_streaming(inbound, session, client)
         return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
 
     def _require_client(self) -> Client:
@@ -528,11 +609,11 @@ class BubACPAgent:
             elif entry.kind == "tool_result":
                 results = _list_payload(entry.payload.get("results"))
                 for index, result in enumerate(results):
-                    tool_index = (
-                        pending_tool_indices[index]
-                        if index < len(pending_tool_indices)
-                        else index
-                    )
+                    if index < len(pending_tool_indices):
+                        tool_index = pending_tool_indices[index]
+                    else:
+                        tool_index = next_tool_index
+                        next_tool_index += 1
                     yield StreamEvent(
                         "tool_result", {"index": tool_index, "result": result}
                     )
@@ -623,9 +704,10 @@ class BubACPAgent:
             self.framework.workspace = session.cwd
             self.framework.bind_channel_router(router)
             try:
-                result = await self.framework.process_inbound(
-                    inbound, stream_output=True
-                )
+                with self.client_tools.observe_terminals(router.attach_terminal):
+                    result = await self.framework.process_inbound(
+                        inbound, stream_output=True
+                    )
             finally:
                 self.framework.bind_channel_router(previous_router)
                 self.framework.workspace = previous_workspace
@@ -633,7 +715,25 @@ class BubACPAgent:
                 await client.session_update(
                     session.session_id, update_agent_message_text(result.model_output)
                 )
+            await self._send_usage_update(client, session.session_id, router.usage)
             return result
+
+    async def _send_usage_update(
+        self,
+        client: Client,
+        session_id: str,
+        usage: Mapping[str, object] | None,
+    ) -> None:
+        used = _usage_total_tokens(usage)
+        if used is None:
+            used = 0
+
+        reported_size = _usage_context_window_size(usage)
+        size = max(used, reported_size or self.settings.context_window_size)
+        await client.session_update(
+            session_id,
+            UsageUpdate(session_update="usage_update", size=size, used=used),
+        )
 
 
 async def run_acp_agent(
@@ -713,7 +813,7 @@ def _tool_call_id(index: int, call: object) -> str:
     return str(candidate or f"tool-{index}")
 
 
-def _tool_title(call: object) -> str:
+def _tool_name(call: object) -> str:
     name = _block_value(call, "name", None)
     if name is None:
         function = _block_value(call, "function", None)
@@ -721,17 +821,43 @@ def _tool_title(call: object) -> str:
     return str(name or "tool")
 
 
-def _tool_kind(title: str) -> ToolKind:
-    lower_title = title.lower()
-    if any(token in lower_title for token in ("read", "cat", "view")):
+def _tool_raw_input(call: object) -> object:
+    function = _block_value(call, "function", None)
+    arguments = _block_value(function, "arguments", None)
+    if arguments is None:
+        arguments = _block_value(call, "arguments", None)
+    if isinstance(arguments, str):
+        with contextlib.suppress(json.JSONDecodeError):
+            return json.loads(arguments)
+    if arguments is not None:
+        return arguments
+    return call
+
+
+def _tool_command(call: object) -> str | None:
+    raw_input = _tool_raw_input(call)
+    command = _block_value(raw_input, "cmd", None)
+    return command if isinstance(command, str) and command else None
+
+
+def _tool_title(call: object) -> str:
+    name = _tool_name(call)
+    if name == "bash" and (command := _tool_command(call)):
+        return command
+    return name
+
+
+def _tool_kind(name: str) -> ToolKind:
+    lower_name = name.lower()
+    if any(token in lower_name for token in ("read", "cat", "view")):
         return "read"
-    if any(token in lower_title for token in ("write", "edit", "patch")):
+    if any(token in lower_name for token in ("write", "edit", "patch")):
         return "edit"
-    if any(token in lower_title for token in ("delete", "remove", "rm")):
+    if any(token in lower_name for token in ("delete", "remove", "rm")):
         return "delete"
-    if any(token in lower_title for token in ("search", "grep", "rg")):
+    if any(token in lower_name for token in ("search", "grep", "rg")):
         return "search"
-    if any(token in lower_title for token in ("bash", "shell", "exec", "run")):
+    if any(token in lower_name for token in ("bash", "shell", "exec", "run")):
         return "execute"
     return "other"
 
@@ -740,6 +866,54 @@ def _int_value(value: object, *, default: int) -> int:
     with contextlib.suppress(TypeError, ValueError):
         return int(value)
     return default
+
+
+def _usage_total_tokens(usage: Mapping[str, object] | None) -> int | None:
+    if usage is None:
+        return None
+
+    total = _non_negative_int(usage.get("total_tokens"))
+    if total is not None:
+        return total
+
+    input_tokens = _first_token_count(usage, "input_tokens", "prompt_tokens")
+    output_tokens = _first_token_count(
+        usage, "output_tokens", "completion_tokens"
+    )
+    if input_tokens is None and output_tokens is None:
+        return None
+    return (input_tokens or 0) + (output_tokens or 0)
+
+
+def _usage_context_window_size(usage: Mapping[str, object] | None) -> int | None:
+    if usage is None:
+        return None
+    return _first_token_count(
+        usage,
+        "context_window_size",
+        "context_window",
+        "max_context_tokens",
+    )
+
+
+def _first_token_count(
+    usage: Mapping[str, object], *keys: str
+) -> int | None:
+    for key in keys:
+        value = _non_negative_int(usage.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _non_negative_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    with contextlib.suppress(TypeError, ValueError):
+        result = int(value)
+        if result >= 0:
+            return result
+    return None
 
 
 def _framework_tape_store(framework: BubFramework) -> object | None:

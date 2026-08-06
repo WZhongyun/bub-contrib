@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bub
+from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
 
@@ -10,3 +11,4 @@ class ACPServerSettings(bub.Settings):
 
     channel_name: str = "acp-server"
     send_user_message_updates: bool = False
+    context_window_size: int = Field(default=128_000, gt=0)

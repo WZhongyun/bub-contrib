@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from acp.schema import TextContentBlock
@@ -12,7 +12,7 @@ from bub.turn import TurnResult
 
 from bub_acp_server import agent as agent_module
 from bub_acp_server import plugin
-from bub_acp_server.agent import BubACPAgent
+from bub_acp_server.agent import ACPStreamRouter, BubACPAgent
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +28,7 @@ class FakeClient:
         self, session_id: str, update: object, **kwargs: Any
     ) -> None:
         self.updates.append((session_id, update))
+
 
 class FakeFramework:
     def __init__(self) -> None:
@@ -58,9 +59,31 @@ class FakeFramework:
         async def stream():
             yield StreamEvent("text", {"delta": "hello"})
             yield StreamEvent(
-                "tool_call", {"index": 0, "call": {"id": "call-1", "name": "bash"}}
+                "tool_call",
+                {
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"cmd":"pwd"}',
+                            },
+                        },
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "fs.read",
+                                "arguments": '{"path":"README.md"}',
+                            },
+                        },
+                    ]
+                },
             )
-            yield StreamEvent("tool_result", {"index": 0, "result": "ok"})
+            yield StreamEvent(
+                "tool_result", {"tool_results": ["/workspace", "README content"]}
+            )
             yield StreamEvent("text", {"delta": " world"})
             yield StreamEvent("final", {"text": "hello world", "ok": True})
 
@@ -394,11 +417,74 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
     assert update_names == [
         "agent_message_chunk",
         "tool_call",
+        "tool_call",
+        "tool_call_update",
         "tool_call_update",
         "agent_message_chunk",
+        "usage_update",
     ]
     assert client.updates[0][1].content.text == "hello"
-    assert client.updates[-1][1].content.text == " world"
+    first_call = client.updates[1][1]
+    second_call = client.updates[2][1]
+    first_result = client.updates[3][1]
+    second_result = client.updates[4][1]
+    assert first_call.tool_call_id == "call-1"
+    assert first_call.title == "pwd"
+    assert first_call.kind == "execute"
+    assert first_call.raw_input == {"cmd": "pwd"}
+    assert second_call.tool_call_id == "call-2"
+    assert second_call.title == "fs.read"
+    assert second_call.kind == "read"
+    assert first_result.tool_call_id == "call-1"
+    assert first_result.raw_output == "/workspace"
+    assert first_result.content[0].content.text == "/workspace"
+    assert second_result.tool_call_id == "call-2"
+    assert second_result.raw_output == "README content"
+    assert client.updates[-2][1].content.text == " world"
+    assert client.updates[-1][1].used == 0
+    assert client.updates[-1][1].size == 128_000
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
+    client = FakeClient()
+    router = ACPStreamRouter(client, "session-1")
+
+    async def stream():
+        yield StreamEvent(
+            "tool_call",
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": '{"cmd":"pwd"}',
+                        },
+                    }
+                ]
+            },
+        )
+        await router.attach_terminal("pwd", "terminal-1")
+        yield StreamEvent("tool_result", {"tool_results": ["/workspace"]})
+
+    async for _ in router.wrap_stream(cast(Any, object()), stream()):
+        pass
+
+    start = client.updates[0][1]
+    terminal_update = client.updates[1][1]
+    result_update = client.updates[2][1]
+    assert start.title == "pwd"
+    assert start.raw_input == {"cmd": "pwd"}
+    assert terminal_update.tool_call_id == "call-1"
+    assert terminal_update.status == "in_progress"
+    assert terminal_update.content[0].type == "terminal"
+    assert terminal_update.content[0].terminal_id == "terminal-1"
+    assert result_update.tool_call_id == "call-1"
+    assert result_update.status == "completed"
+    assert result_update.raw_output == "/workspace"
+    assert result_update.content is None
 
 
 @pytest.mark.asyncio
@@ -413,4 +499,5 @@ async def test_prompt_sends_complete_output_when_stream_has_no_text_chunks() -> 
         [TextContentBlock(type="text", text="hello")], session_id=session.session_id
     )
 
-    assert [update.content.text for _, update in client.updates] == ["late text"]
+    assert client.updates[0][1].content.text == "late text"
+    assert client.updates[1][1].session_update == "usage_update"

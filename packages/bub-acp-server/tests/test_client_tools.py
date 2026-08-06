@@ -153,6 +153,30 @@ async def test_replaces_file_edit_with_acp_read_and_write_calls(
     ]
     assert client.write_requests == [
         {
+            "content": "before\nnew value\nafter\n",
+            "path": str(tmp_path / "notes.txt"),
+            "session_id": "session-1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_edit_preserves_missing_trailing_newline(tmp_path: Path) -> None:
+    client = FakeClient()
+    client.read_content = "before\nold value\nafter"
+    context = _context(tmp_path)
+
+    with replace_builtin_tools(_runtime(client)):
+        await REGISTRY["fs.edit"].run(
+            path="notes.txt",
+            old="old",
+            new="new",
+            start=1,
+            context=context,
+        )
+
+    assert client.write_requests == [
+        {
             "content": "before\nnew value\nafter",
             "path": str(tmp_path / "notes.txt"),
             "session_id": "session-1",
@@ -166,15 +190,21 @@ async def test_replaces_bash_with_acp_terminal_calls(tmp_path: Path) -> None:
 
     client = FakeClient()
     context = _context(tmp_path)
+    observed_terminals: list[tuple[str, str]] = []
     original = REGISTRY["bash"]
+    runtime = _runtime(client)
 
-    with replace_builtin_tools(_runtime(client)):
+    async def observe_terminal(command: str, terminal_id: str) -> None:
+        observed_terminals.append((command, terminal_id))
+
+    with replace_builtin_tools(runtime), runtime.observe_terminals(observe_terminal):
         assert REGISTRY["bash"] is not original
         assert REGISTRY["bash"].parameters == original.parameters
         result = await REGISTRY["bash"].run(cmd="pwd", context=context)
 
     assert REGISTRY["bash"] is original
     assert result == "hello"
+    assert observed_terminals == [("pwd", "terminal-1")]
     assert client.create_requests == [
         {
             "command": "bash",
@@ -201,9 +231,7 @@ async def test_background_bash_uses_acp_output_and_kill(tmp_path: Path) -> None:
         output = await REGISTRY["bash.output"].run(
             shell_id="terminal-1", context=context
         )
-        killed = await REGISTRY["bash.kill"].run(
-            shell_id="terminal-1", context=context
-        )
+        killed = await REGISTRY["bash.kill"].run(shell_id="terminal-1", context=context)
 
     terminal_request = {"session_id": "session-1", "terminal_id": "terminal-1"}
     assert started == "started: terminal-1"

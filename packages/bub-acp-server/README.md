@@ -39,6 +39,8 @@ bub-acp-server
 
 The process speaks ACP over stdio. Prompts are sent through Bub's hook pipeline with stream output enabled, so model chunks and tool events can be displayed by the ACP client as they arrive.
 
+At the end of every turn, the agent sends an ACP `usage_update`. Missing token usage is reported as `0`. If the model provider does not report its context-window size, set `BUB_ACP_SERVER_CONTEXT_WINDOW_SIZE`; the default is `128000` tokens.
+
 Bub keeps using its own configuration, tools, skills, and tapes. The ACP client starts the process and displays the session; it does not replace Bub's model setup.
 
 ACP session metadata is stored under Bub home as `acp-sessions.json` so compatible clients can list sessions again after restarting. Keep `BUB_HOME` stable if you want the same ACP thread list across editor launches.
