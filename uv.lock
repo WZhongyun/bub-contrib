@@ -371,7 +371,6 @@ version = "0.1.0"
 source = { editable = "packages/bub-acp-server" }
 dependencies = [
     { name = "agent-client-protocol" },
-    { name = "bub" },
 ]
 
 [package.dev-dependencies]
@@ -381,10 +380,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "agent-client-protocol", specifier = "==0.10.1" },
-    { name = "bub", git = "https://github.com/bubbuild/bub.git" },
-]
+requires-dist = [{ name = "agent-client-protocol", specifier = "==0.10.1" }]
 
 [package.metadata.requires-dev]
 dev = [
