@@ -9,7 +9,6 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "agent-client-protocol==0.10.1",
-    "bub",
 ]
 
 [project.entry-points.bub]
