@@ -19,6 +19,7 @@ from acp import (
     run_agent,
     text_block,
     update_agent_message_text,
+    update_agent_thought_text,
     update_user_message,
     update_user_message_text,
 )
@@ -205,6 +206,10 @@ class ACPStreamRouter:
             if delta:
                 self._sent_text = True
                 await self._send_agent_text(delta)
+        elif event.kind == "reasoning":
+            delta = str(event.data.get("delta", ""))
+            if delta:
+                await self._send_agent_thought(delta)
         elif event.kind == "user_text":
             delta = str(event.data.get("delta", ""))
             if delta:
@@ -224,6 +229,13 @@ class ACPStreamRouter:
             return
         await self._client.session_update(
             self._session_id, update_agent_message_text(text)
+        )
+
+    async def _send_agent_thought(self, text: str) -> None:
+        if not text:
+            return
+        await self._client.session_update(
+            self._session_id, update_agent_thought_text(text)
         )
 
     async def _send_user_text(self, text: str) -> None:
@@ -877,9 +889,7 @@ def _usage_total_tokens(usage: Mapping[str, object] | None) -> int | None:
         return total
 
     input_tokens = _first_token_count(usage, "input_tokens", "prompt_tokens")
-    output_tokens = _first_token_count(
-        usage, "output_tokens", "completion_tokens"
-    )
+    output_tokens = _first_token_count(usage, "output_tokens", "completion_tokens")
     if input_tokens is None and output_tokens is None:
         return None
     return (input_tokens or 0) + (output_tokens or 0)
@@ -896,9 +906,7 @@ def _usage_context_window_size(usage: Mapping[str, object] | None) -> int | None
     )
 
 
-def _first_token_count(
-    usage: Mapping[str, object], *keys: str
-) -> int | None:
+def _first_token_count(usage: Mapping[str, object], *keys: str) -> int | None:
     for key in keys:
         value = _non_negative_int(usage.get(key))
         if value is not None:

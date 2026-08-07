@@ -78,9 +78,7 @@ class E2EFramework:
 
         events = AsyncStreamEvents(
             stream(),
-            state=StreamState(
-                usage={"prompt_tokens": 21, "completion_tokens": 13}
-            ),
+            state=StreamState(usage={"prompt_tokens": 21, "completion_tokens": 13}),
         )
         async for _ in self._channel_router.wrap_stream(inbound, events):
             pass

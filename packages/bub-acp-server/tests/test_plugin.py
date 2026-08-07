@@ -59,6 +59,7 @@ class FakeFramework:
 
         async def stream():
             yield StreamEvent("text", {"delta": "hello"})
+            yield StreamEvent("reasoning", {"delta": "thinking hard"})
             yield StreamEvent(
                 "tool_call",
                 {
@@ -454,6 +455,7 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
     update_names = [update.session_update for _, update in client.updates]
     assert update_names == [
         "agent_message_chunk",
+        "agent_thought_chunk",
         "tool_call",
         "tool_call",
         "tool_call_update",
@@ -462,10 +464,12 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
         "usage_update",
     ]
     assert client.updates[0][1].content.text == "hello"
-    first_call = client.updates[1][1]
-    second_call = client.updates[2][1]
-    first_result = client.updates[3][1]
-    second_result = client.updates[4][1]
+    thought = client.updates[1][1]
+    assert thought.content.text == "thinking hard"
+    first_call = client.updates[2][1]
+    second_call = client.updates[3][1]
+    first_result = client.updates[4][1]
+    second_result = client.updates[5][1]
     assert first_call.tool_call_id == "call-1"
     assert first_call.title == "pwd"
     assert first_call.kind == "execute"
