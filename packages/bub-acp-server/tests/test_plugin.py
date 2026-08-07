@@ -4,15 +4,16 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import typer
 from acp.schema import TextContentBlock
 from bub.model_selection import ModelChoice, ModelOptions
 from bub.streaming import StreamEvent
 from bub.tape import TapeEntry, TapeQuery
 from bub.turn import TurnResult
-
 from bub_acp_server import agent as agent_module
 from bub_acp_server import plugin
 from bub_acp_server.agent import ACPStreamRouter, BubACPAgent
+from typer.testing import CliRunner
 
 
 @pytest.fixture(autouse=True)
@@ -157,6 +158,43 @@ class ConfigFramework(FakeFramework):
             ],
             current_model="openai:gpt-5",
         )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "exit_code", "message", "expected_calls"),
+    [
+        (["acp"], 0, "", 1),
+        (["acp", "serve"], 0, "is deprecated", 1),
+        (["acp", "invalid"], 2, "Got unexpected extra argument", 0),
+    ],
+)
+def test_register_cli_accepts_only_deprecated_serve_argument(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    exit_code: int,
+    message: str,
+    expected_calls: int,
+) -> None:
+    framework = FakeFramework()
+    calls: list[FakeFramework] = []
+
+    async def fake_run_acp_agent(candidate: FakeFramework) -> None:
+        calls.append(candidate)
+
+    monkeypatch.setattr(plugin, "run_acp_agent", fake_run_acp_agent)
+    app = typer.Typer()
+
+    @app.callback()
+    def main() -> None:
+        pass
+
+    plugin.ACPServerPlugin(cast(Any, framework)).register_cli_commands(app)
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code == exit_code
+    assert message in result.output
+    assert calls == [framework] * expected_calls
 
 
 @pytest.mark.asyncio

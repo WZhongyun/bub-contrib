@@ -5,7 +5,7 @@ Expose Bub as an Agent Client Protocol agent.
 ## What It Provides
 
 - Bub plugin entry point: `acp-server`
-- CLI command registered on Bub: `bub acp serve`
+- CLI command registered on Bub: `bub acp`
 - Standalone console script: `bub-acp-server`
 - ACP agent methods for `initialize`, `session/new`, `session/load`, `session/resume`, `session/list`, `session/close`, and `session/prompt`
 - Streaming ACP `session/update` events from Bub stream events
@@ -28,8 +28,10 @@ bub install bub-acp-server@main
 Configure an ACP-compatible client to launch one of:
 
 ```bash
-bub acp serve
+bub acp
 ```
+
+The previous `bub acp serve` form remains accepted temporarily and prints a deprecation warning. Other positional arguments are rejected.
 
 or:
 
@@ -68,7 +70,7 @@ Open Zed's settings with the `zed: open settings` command and add a custom agent
     "Bub": {
       "type": "custom",
       "command": "bub",
-      "args": ["acp", "serve"],
+      "args": ["acp"],
       "env": {}
     }
   }
@@ -83,7 +85,7 @@ If Zed cannot find `bub`, use the absolute path printed by `command -v bub`:
     "Bub": {
       "type": "custom",
       "command": "/absolute/path/to/bub",
-      "args": ["acp", "serve"],
+      "args": ["acp"],
       "env": {}
     }
   }
@@ -101,7 +103,7 @@ Notes:
 
 - Zed launches Bub as a separate ACP process. Bub reads its own local configuration and credentials directly.
 - Use `env` only for settings your Bub installation actually needs.
-- If your Bub configuration is loaded from a project `.env`, use a wrapper command that loads that file before running `bub acp serve`.
+- If your Bub configuration is loaded from a project `.env`, use a wrapper command that loads that file before running `bub acp`.
 
 References:
 

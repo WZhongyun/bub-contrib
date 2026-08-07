@@ -20,12 +20,16 @@ class ACPServerPlugin:
 
     @hookimpl
     def register_cli_commands(self, app: typer.Typer) -> None:
-        acp_app = typer.Typer(
-            name="acp", help="Run Bub as an ACP agent.", add_completion=False
-        )
-
-        @acp_app.command("serve")
-        def serve() -> None:
+        @app.command("acp", help="Run Bub as an ACP agent.")
+        def acp(command: str | None = typer.Argument(None, metavar="[serve]")) -> None:
+            if command == "serve":
+                typer.echo(
+                    "Warning: `bub acp serve` is deprecated; use `bub acp` instead.",
+                    err=True,
+                )
+            elif command is not None:
+                raise typer.BadParameter(
+                    f"Got unexpected extra argument {command!r}",
+                    param_hint="command",
+                )
             asyncio.run(run_acp_agent(self.framework))
-
-        app.add_typer(acp_app, name="acp")
