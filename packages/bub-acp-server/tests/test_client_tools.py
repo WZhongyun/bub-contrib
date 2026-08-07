@@ -81,7 +81,7 @@ def _context(tmp_path: Path) -> ToolContext:
     return ToolContext(
         tape=cast(Any, object()),
         state={
-            "session_id": "session-1",
+            "session_id": "acp-server:session-1",
             "_runtime_workspace": str(tmp_path),
         },
     )
@@ -267,7 +267,10 @@ async def test_update_plan_updates_acp_ui_and_persists_tape(tmp_path: Path) -> N
     context = ToolContext(
         tape=cast(Any, tape),
         run_id="run-1",
-        state={"session_id": "session-1", "_runtime_workspace": str(tmp_path)},
+        state={
+            "session_id": "acp-server:session-1",
+            "_runtime_workspace": str(tmp_path),
+        },
     )
     assert "update_plan" not in REGISTRY
 

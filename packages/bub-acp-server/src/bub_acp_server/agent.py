@@ -84,7 +84,9 @@ type ACPMcpServer = HttpMcpServer | SseMcpServer | McpServerStdio
 type StreamPayload = Mapping[str, object]
 
 _BUB_PROMPT_CONTEXT = re.compile(
-    r"^acp_session_id=[^\n]+\n---Date: [^\n]+---\n", re.MULTILINE
+    r"^(?=[^\n]*channel=\$)(?=[^\n]*chat_id=)[^\n]+\n"
+    r"---Date: [^\n]+---\n",
+    re.MULTILINE,
 )
 _CONTINUATION_PROMPT_PREFIX = "Continue the task until all targets are completed."
 
@@ -158,9 +160,7 @@ class ACPSession:
 class ACPStreamState:
     tool_ids: dict[int, str] = field(default_factory=dict)
     pending_tool_indices: list[int] = field(default_factory=list)
-    pending_terminal_calls: list[tuple[str | None, int]] = field(
-        default_factory=list
-    )
+    pending_terminal_calls: list[tuple[str | None, int]] = field(default_factory=list)
     terminal_tool_indices: set[int] = field(default_factory=set)
     next_tool_index: int = 0
     sent_text: bool = False
@@ -175,7 +175,7 @@ class ACPStreamRouter:
     def wrap_stream(
         self, message: Envelope, stream: AsyncIterable[StreamEvent]
     ) -> AsyncIterable[StreamEvent]:
-        session_id = _message_session_id(message)
+        session_id = _message_chat_id(message)
         state = ACPStreamState()
         self._stream_states[session_id] = state
 
@@ -196,9 +196,7 @@ class ACPStreamRouter:
 
     async def dispatch_output(self, message: Envelope) -> bool:
         if field_of(message, "kind") == "error":
-            await self._send_agent_text(
-                _message_session_id(message), content_of(message)
-            )
+            await self._send_agent_text(_message_chat_id(message), content_of(message))
         return True
 
     async def quit(self, session_id: str) -> None:
@@ -324,9 +322,7 @@ class ACPStreamRouter:
             else:
                 index = state.next_tool_index
                 state.next_tool_index += 1
-            await self._send_tool_result(
-                session_id, {"index": index, "result": result}
-            )
+            await self._send_tool_result(session_id, {"index": index, "result": result})
         state.pending_tool_indices = []
 
     async def _send_tool_result(self, session_id: str, data: StreamPayload) -> None:
@@ -514,11 +510,11 @@ class BubACPAgent:
         self._save_sessions()
 
         content, media = _prompt_to_bub_content(prompt)
-        context = {"acp_session_id": session_id}
+        context: dict[str, str] = {}
         if model := session.runtime.get("model"):
             context["model"] = model
         inbound = ChannelMessage(
-            session_id=session_id,
+            session_id=_bub_session_id(self.settings.channel_name, session_id),
             channel=self.settings.channel_name,
             chat_id=session_id,
             content=content,
@@ -601,13 +597,12 @@ class BubACPAgent:
     async def _attach_session_history(self, session: ACPSession) -> None:
         router = self._require_stream_router()
         inbound = ChannelMessage(
-            session_id=session.session_id,
+            session_id=_bub_session_id(self.settings.channel_name, session.session_id),
             channel=self.settings.channel_name,
             chat_id=session.session_id,
             content="",
             is_active=False,
             kind="normal",
-            context={"acp_session_id": session.session_id},
         )
         try:
             async for _ in router.wrap_stream(
@@ -660,7 +655,10 @@ class BubACPAgent:
                 )
 
     async def _load_tape_entries(self, session: ACPSession) -> list[TapeEntry]:
-        tape_name = _session_tape_name(session.session_id, session.cwd)
+        tape_name = _session_tape_name(
+            _bub_session_id(self.settings.channel_name, session.session_id),
+            session.cwd,
+        )
         store = _framework_tape_store(self.framework)
         if store is not None:
             query = TapeQuery(tape_name, store)
@@ -677,7 +675,7 @@ class BubACPAgent:
         self, session: ACPSession
     ) -> list[SessionConfigOptionSelect] | None:
         model_options = await self.framework.get_model_options(
-            session_id=session.session_id,
+            session_id=_bub_session_id(self.settings.channel_name, session.session_id),
             workspace=session.cwd,
         )
         acp_options = _model_options_to_acp_config_options(model_options, session)
@@ -778,11 +776,15 @@ async def run_acp_agent(
             await run_agent(agent, use_unstable_protocol=use_unstable_protocol)
 
 
-def _message_session_id(message: Envelope) -> str:
-    session_id = field_of(message, "session_id")
-    if session_id is None or not str(session_id).strip():
-        raise RuntimeError("Bub message does not contain a session id")
-    return str(session_id)
+def _message_chat_id(message: Envelope) -> str:
+    chat_id = field_of(message, "chat_id")
+    if chat_id is None or not str(chat_id).strip():
+        raise RuntimeError("Bub message does not contain a chat id")
+    return str(chat_id)
+
+
+def _bub_session_id(channel: str, chat_id: str) -> str:
+    return f"{channel}:{chat_id}"
 
 
 def _prompt_to_bub_content(prompt: list[ACPPromptBlock]) -> tuple[str, list[MediaItem]]:

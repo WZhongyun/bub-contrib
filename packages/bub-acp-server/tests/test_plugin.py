@@ -9,7 +9,14 @@ import typer
 from acp.schema import TextContentBlock
 from bub.model_selection import ModelChoice, ModelOptions
 from bub.streaming import StreamEvent
-from bub.tape import TapeContext, TapeEntry, TapeQuery, build_messages
+from bub.tape import (
+    LAST_ANCHOR,
+    InMemoryTapeStore,
+    TapeContext,
+    TapeEntry,
+    TapeQuery,
+    build_messages,
+)
 from bub.turn import TurnResult
 from bub_acp_server import agent as agent_module
 from bub_acp_server import plugin
@@ -199,22 +206,20 @@ def test_register_cli_accepts_only_deprecated_serve_argument(
     assert calls == [framework] * expected_calls
 
 
-def test_plan_prompt_is_only_enabled_for_acp_sessions() -> None:
+def test_plan_prompt_is_enabled_for_acp_server_turns() -> None:
     implementation = plugin.ACPServerPlugin(cast(Any, FakeFramework()))
 
     acp_prompt = implementation.system_prompt(
-        "task", {"context": "acp_session_id=session-1|channel=$acp-server"}
+        "task", {"context": "channel=$acp-server|chat_id=session-1"}
     )
-    regular_prompt = implementation.system_prompt("task", {"context": "channel=$cli"})
 
     assert "`update_plan` tool" in acp_prompt
     assert "complete plan on every update" in acp_prompt
     assert "latest persisted plan" in acp_prompt
-    assert regular_prompt == ""
 
 
 @pytest.mark.asyncio
-async def test_tape_context_injects_latest_plan_across_anchor(
+async def test_tape_context_injects_latest_plan_after_last_anchor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old_plan = TapeEntry.event(
@@ -237,9 +242,9 @@ async def test_tape_context_injects_latest_plan_across_anchor(
     entries = [
         TapeEntry.message({"role": "user", "content": "Before anchor"}),
         old_plan,
-        latest_plan,
         TapeEntry.anchor("handoff"),
         TapeEntry.message({"role": "user", "content": "After anchor"}),
+        latest_plan,
     ]
     implementation = plugin.ACPServerPlugin(cast(Any, FakeFramework()))
     default_select = plugin.default_tape_context().select
@@ -256,11 +261,15 @@ async def test_tape_context_injects_latest_plan_across_anchor(
         lambda: TapeContext(select=async_default_select),
     )
     context = implementation.build_tape_context()
-    context.state["context"] = "acp_session_id=session-1|channel=$acp-server"
+    context.state["context"] = "channel=$acp-server|chat_id=session-1"
+    store = InMemoryTapeStore()
+    for entry in entries:
+        store.append("session", entry)
 
-    messages = await cast(Any, build_messages(entries, context))
+    contextual_entries = context.build_query(TapeQuery("session", store)).all()
+    messages = await cast(Any, build_messages(contextual_entries, context))
 
-    assert context.anchor is None
+    assert context.anchor is LAST_ANCHOR
     assert messages[0] == {"role": "user", "content": "After anchor"}
     assert messages[1]["role"] == "assistant"
     assert "<current_plan>" in messages[1]["content"]
@@ -268,11 +277,6 @@ async def test_tape_context_injects_latest_plan_across_anchor(
     assert '"explanation": "Current direction"' in messages[1]["content"]
     assert all("Before anchor" not in message["content"] for message in messages)
     assert all("Old step" not in message["content"] for message in messages)
-
-    regular_context = implementation.build_tape_context()
-    regular_context.state["context"] = "channel=$cli"
-    regular_messages = await cast(Any, build_messages(entries, regular_context))
-    assert regular_messages == [{"role": "user", "content": "After anchor"}]
 
 
 @pytest.mark.asyncio
@@ -317,7 +321,7 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
             {
                 "role": "user",
                 "content": (
-                    f"acp_session_id={session_id}|channel=$acp-server|chat_id={session_id}\n"
+                    f"channel=$acp-server|chat_id={session_id}\n"
                     "---Date: 2026-06-01T03:42:01+08:00---\n"
                     "HELLO"
                 ),
@@ -331,7 +335,7 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
             "message",
             {
                 "role": "user",
-                "content": "Continue the task until all targets are completed. [context: acp_session_id=x]",
+                "content": "Continue the task until all targets are completed. [context: chat_id=x]",
             },
         ),
     ]
@@ -344,7 +348,9 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
 
     assert response is not None
     assert framework.tape_store.queries == [
-        agent_module._session_tape_name(session_id, tmp_path)
+        agent_module._session_tape_name(
+            agent_module._bub_session_id("acp-server", session_id), tmp_path
+        )
     ]
     update_names = [update.session_update for _, update in client.updates]
     assert update_names == [
@@ -393,9 +399,9 @@ async def test_session_lifecycle_returns_config_options(tmp_path: Path) -> None:
     assert resumed.config_options is not None
     assert resumed.config_options[0].id == "model"
     assert framework.model_queries == [
-        (created.session_id, tmp_path),
-        (created.session_id, tmp_path),
-        (created.session_id, tmp_path),
+        (f"acp-server:{created.session_id}", tmp_path),
+        (f"acp-server:{created.session_id}", tmp_path),
+        (f"acp-server:{created.session_id}", tmp_path),
     ]
 
 
@@ -419,8 +425,8 @@ async def test_set_config_option_updates_session_runtime_and_returns_config_opti
     assert response.config_options[0].id == "model"
     assert response.config_options[0].current_value == "anthropic:claude-sonnet-4-5"
     assert framework.model_queries == [
-        (created.session_id, tmp_path),
-        (created.session_id, tmp_path),
+        (f"acp-server:{created.session_id}", tmp_path),
+        (f"acp-server:{created.session_id}", tmp_path),
     ]
 
 
@@ -461,6 +467,9 @@ async def test_prompt_passes_model_selection_to_bub_context(tmp_path: Path) -> N
     )
 
     assert framework.messages[0].context["model"] == "anthropic:claude-sonnet-4-5"
+    assert framework.messages[0].context["chat_id"] == created.session_id
+    assert "acp_session_id" not in framework.messages[0].context
+    assert framework.messages[0].session_id == f"acp-server:{created.session_id}"
     assert not hasattr(framework.messages[0], "runtime")
 
 
@@ -585,7 +594,7 @@ async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
         await router.attach_terminal("session-1", "pwd", "terminal-1")
         yield StreamEvent("tool_result", {"tool_results": ["/workspace"]})
 
-    async for _ in router.wrap_stream({"session_id": "session-1"}, stream()):
+    async for _ in router.wrap_stream({"chat_id": "session-1"}, stream()):
         pass
 
     start = client.updates[0][1]
@@ -632,7 +641,7 @@ async def test_stream_router_isolates_concurrent_session_state() -> None:
 
     async def consume(session_id: str, tool_call_id: str) -> None:
         async for _ in router.wrap_stream(
-            {"session_id": session_id}, stream(tool_call_id)
+            {"chat_id": session_id}, stream(tool_call_id)
         ):
             pass
 

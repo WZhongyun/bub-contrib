@@ -361,7 +361,10 @@ def _session_id(context: ToolContext) -> str:
     value = context.state.get("session_id")
     if value is None or not str(value).strip():
         raise RuntimeError("Bub tool context does not contain a session id")
-    return str(value)
+    _, separator, session_id = str(value).partition(":")
+    if not separator or not session_id:
+        raise RuntimeError("Bub tool context does not contain an ACP session id")
+    return session_id
 
 
 def _resolve_path(context: ToolContext, path: str) -> Path:

@@ -37,16 +37,7 @@ Use the `update_plan` tool to keep the ACP plan UI accurate for non-trivial work
 async def _select_tape_context(
     entries: Iterable[TapeEntry], context: TapeContext
 ) -> list[dict[str, Any]]:
-    all_entries = list(entries)
-    last_anchor = next(
-        (
-            index
-            for index in range(len(all_entries) - 1, -1, -1)
-            if all_entries[index].kind == "anchor"
-        ),
-        -1,
-    )
-    contextual_entries = all_entries[last_anchor + 1 :]
+    contextual_entries = list(entries)
     default_select = default_tape_context().select
     if default_select is None:
         messages: list[dict[str, Any]] = []
@@ -56,11 +47,7 @@ async def _select_tape_context(
             selected = await selected
         messages = selected
 
-    runtime_context = context.state.get("context")
-    if not isinstance(runtime_context, str) or "acp_session_id=" not in runtime_context:
-        return messages
-
-    for entry in reversed(all_entries):
+    for entry in reversed(contextual_entries):
         if entry.kind != "event" or entry.payload.get("name") != "plan":
             continue
         plan = entry.payload.get("data")
@@ -86,14 +73,11 @@ class ACPServerPlugin:
 
     @hookimpl
     def build_tape_context(self) -> TapeContext:
-        return TapeContext(anchor=None, select=_select_tape_context)
+        return TapeContext(select=_select_tape_context)
 
     @hookimpl
     def system_prompt(self, prompt: str | list[dict], state: TurnState) -> str:
-        del prompt
-        context = state.get("context")
-        if not isinstance(context, str) or "acp_session_id=" not in context:
-            return ""
+        del prompt, state
         return ACP_PLAN_SYSTEM_PROMPT
 
     @hookimpl
