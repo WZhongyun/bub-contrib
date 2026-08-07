@@ -60,7 +60,6 @@ from acp.schema import (
     ToolKind,
     UsageUpdate,
 )
-from bub.channels.contracts import ChannelRouter
 from bub.channels.message import ChannelMessage, MediaItem, MediaType
 from bub.envelope import Envelope, content_of, field_of
 from bub.model_selection import ModelChoice, ModelOptions
@@ -155,121 +154,123 @@ class ACPSession:
         )
 
 
+@dataclass(slots=True)
+class ACPStreamState:
+    tool_ids: dict[int, str] = field(default_factory=dict)
+    pending_tool_indices: list[int] = field(default_factory=list)
+    pending_terminal_calls: list[tuple[str | None, int]] = field(
+        default_factory=list
+    )
+    terminal_tool_indices: set[int] = field(default_factory=set)
+    next_tool_index: int = 0
+    sent_text: bool = False
+    usage: Mapping[str, object] | None = None
+
+
 class ACPStreamRouter:
-    def __init__(self, client: Client, session_id: str) -> None:
+    def __init__(self, client: Client) -> None:
         self._client = client
-        self._session_id = session_id
-        self._tool_ids: dict[int, str] = {}
-        self._pending_tool_indices: list[int] = []
-        self._pending_terminal_calls: list[tuple[str | None, int]] = []
-        self._terminal_tool_indices: set[int] = set()
-        self._next_tool_index = 0
-        self._sent_text = False
-        self._usage: Mapping[str, object] | None = None
-
-    @property
-    def sent_text(self) -> bool:
-        return self._sent_text
-
-    @property
-    def usage(self) -> Mapping[str, object] | None:
-        return self._usage
+        self._stream_states: dict[str, ACPStreamState] = {}
 
     def wrap_stream(
         self, message: Envelope, stream: AsyncIterable[StreamEvent]
     ) -> AsyncIterable[StreamEvent]:
-        del message
+        session_id = _message_session_id(message)
+        state = ACPStreamState()
+        self._stream_states[session_id] = state
 
         async def iterator() -> AsyncIterator[StreamEvent]:
             try:
                 async for event in stream:
-                    await self._publish_stream_event(event)
+                    await self.publish_event(session_id, event)
                     yield event
             finally:
                 usage = getattr(stream, "usage", None)
                 if isinstance(usage, Mapping):
-                    self._usage = usage
+                    state.usage = usage
 
         return iterator()
 
+    def pop_stream_state(self, session_id: str) -> ACPStreamState | None:
+        return self._stream_states.pop(session_id, None)
+
     async def dispatch_output(self, message: Envelope) -> bool:
         if field_of(message, "kind") == "error":
-            await self._send_agent_text(content_of(message))
+            await self._send_agent_text(
+                _message_session_id(message), content_of(message)
+            )
         return True
 
     async def quit(self, session_id: str) -> None:
         del session_id
 
-    async def _publish_stream_event(self, event: StreamEvent) -> None:
+    async def publish_event(self, session_id: str, event: StreamEvent) -> None:
+        state = self._stream_states.setdefault(session_id, ACPStreamState())
         if event.kind == "text":
             delta = str(event.data.get("delta", ""))
             if delta:
-                self._sent_text = True
-                await self._send_agent_text(delta)
+                state.sent_text = True
+                await self._send_agent_text(session_id, delta)
         elif event.kind == "reasoning":
             delta = str(event.data.get("delta", ""))
             if delta:
-                await self._send_agent_thought(delta)
+                await self._send_agent_thought(session_id, delta)
         elif event.kind == "user_text":
             delta = str(event.data.get("delta", ""))
             if delta:
-                await self._send_user_text(delta)
+                await self._send_user_text(session_id, delta)
         elif event.kind == "tool_call":
-            await self._send_tool_calls(event.data)
+            await self._send_tool_calls(session_id, event.data)
         elif event.kind == "tool_result":
-            await self._send_tool_results(event.data)
+            await self._send_tool_results(session_id, event.data)
         elif event.kind == "error":
             message = (
                 event.data.get("message") or event.data.get("error") or "unknown error"
             )
-            await self._send_agent_text(f"\nError: {message}")
+            await self._send_agent_text(session_id, f"\nError: {message}")
 
-    async def _send_agent_text(self, text: str) -> None:
+    async def _send_agent_text(self, session_id: str, text: str) -> None:
         if not text:
             return
-        await self._client.session_update(
-            self._session_id, update_agent_message_text(text)
-        )
+        await self._client.session_update(session_id, update_agent_message_text(text))
 
-    async def _send_agent_thought(self, text: str) -> None:
+    async def _send_agent_thought(self, session_id: str, text: str) -> None:
         if not text:
             return
-        await self._client.session_update(
-            self._session_id, update_agent_thought_text(text)
-        )
+        await self._client.session_update(session_id, update_agent_thought_text(text))
 
-    async def _send_user_text(self, text: str) -> None:
+    async def _send_user_text(self, session_id: str, text: str) -> None:
         if not text:
             return
-        await self._client.session_update(
-            self._session_id, update_user_message_text(text)
-        )
+        await self._client.session_update(session_id, update_user_message_text(text))
 
-    async def _send_tool_calls(self, data: StreamPayload) -> None:
-        self._pending_terminal_calls = []
+    async def _send_tool_calls(self, session_id: str, data: StreamPayload) -> None:
+        state = self._stream_states[session_id]
+        state.pending_terminal_calls = []
         if "tool_calls" not in data:
-            index = await self._send_tool_call(data)
-            self._pending_tool_indices = [index]
+            index = await self._send_tool_call(session_id, data)
+            state.pending_tool_indices = [index]
             return
 
         calls = _list_payload(data.get("tool_calls"))
-        self._pending_tool_indices = []
+        state.pending_tool_indices = []
         for call in calls:
-            index = await self._send_tool_call({"call": call})
-            self._pending_tool_indices.append(index)
+            index = await self._send_tool_call(session_id, {"call": call})
+            state.pending_tool_indices.append(index)
 
-    async def _send_tool_call(self, data: StreamPayload) -> int:
-        index = _int_value(data.get("index"), default=self._next_tool_index)
-        self._next_tool_index = max(self._next_tool_index, index + 1)
+    async def _send_tool_call(self, session_id: str, data: StreamPayload) -> int:
+        state = self._stream_states[session_id]
+        index = _int_value(data.get("index"), default=state.next_tool_index)
+        state.next_tool_index = max(state.next_tool_index, index + 1)
         call = data.get("call")
         tool_id = _tool_call_id(index, call)
-        self._tool_ids[index] = tool_id
+        state.tool_ids[index] = tool_id
         tool_name = _tool_name(call)
         title = _tool_title(call)
         if tool_name == "bash":
-            self._pending_terminal_calls.append((_tool_command(call), index))
+            state.pending_terminal_calls.append((_tool_command(call), index))
         await self._client.session_update(
-            self._session_id,
+            session_id,
             start_tool_call(
                 tool_id,
                 title,
@@ -280,25 +281,28 @@ class ACPStreamRouter:
         )
         return index
 
-    async def attach_terminal(self, command: str, terminal_id: str) -> None:
-        if not self._pending_terminal_calls:
+    async def attach_terminal(
+        self, session_id: str, command: str, terminal_id: str
+    ) -> None:
+        state = self._stream_states.get(session_id)
+        if state is None or not state.pending_terminal_calls:
             return
 
         position = next(
             (
                 position
                 for position, (pending_command, _) in enumerate(
-                    self._pending_terminal_calls
+                    state.pending_terminal_calls
                 )
                 if pending_command == command
             ),
             0,
         )
-        _, index = self._pending_terminal_calls.pop(position)
-        tool_id = self._tool_ids[index]
-        self._terminal_tool_indices.add(index)
+        _, index = state.pending_terminal_calls.pop(position)
+        tool_id = state.tool_ids[index]
+        state.terminal_tool_indices.add(index)
         await self._client.session_update(
-            self._session_id,
+            session_id,
             update_tool_call(
                 tool_id,
                 status="in_progress",
@@ -306,31 +310,35 @@ class ACPStreamRouter:
             ),
         )
 
-    async def _send_tool_results(self, data: StreamPayload) -> None:
+    async def _send_tool_results(self, session_id: str, data: StreamPayload) -> None:
+        state = self._stream_states[session_id]
         if "tool_results" not in data:
-            await self._send_tool_result(data)
-            self._pending_tool_indices = []
+            await self._send_tool_result(session_id, data)
+            state.pending_tool_indices = []
             return
 
         results = _list_payload(data.get("tool_results"))
         for position, result in enumerate(results):
-            if position < len(self._pending_tool_indices):
-                index = self._pending_tool_indices[position]
+            if position < len(state.pending_tool_indices):
+                index = state.pending_tool_indices[position]
             else:
-                index = self._next_tool_index
-                self._next_tool_index += 1
-            await self._send_tool_result({"index": index, "result": result})
-        self._pending_tool_indices = []
+                index = state.next_tool_index
+                state.next_tool_index += 1
+            await self._send_tool_result(
+                session_id, {"index": index, "result": result}
+            )
+        state.pending_tool_indices = []
 
-    async def _send_tool_result(self, data: StreamPayload) -> None:
+    async def _send_tool_result(self, session_id: str, data: StreamPayload) -> None:
+        state = self._stream_states[session_id]
         index = _int_value(data.get("index"), default=0)
-        tool_id = self._tool_ids.get(index, f"tool-{index}")
+        tool_id = state.tool_ids.get(index, f"tool-{index}")
         result = data.get("result")
         content = None
-        if index not in self._terminal_tool_indices:
+        if index not in state.terminal_tool_indices:
             content = [tool_content(text_block(_stringify(result)))]
         await self._client.session_update(
-            self._session_id,
+            session_id,
             update_tool_call(
                 tool_id,
                 status="completed",
@@ -351,6 +359,7 @@ class BubACPAgent:
         self.settings = bub.ensure_config(ACPServerSettings)
         self.client_tools = client_tools or ACPClientToolRuntime()
         self._client: Client | None = None
+        self._stream_router: ACPStreamRouter | None = None
         self._session_store_path = bub.home.expanduser() / "acp-sessions.json"
         self._sessions: dict[str, ACPSession] = self._load_sessions()
         self._prompt_lock = asyncio.Lock()
@@ -358,6 +367,9 @@ class BubACPAgent:
     def on_connect(self, conn: Client) -> None:
         self._client = conn
         self.client_tools.connect(conn)
+        self._stream_router = ACPStreamRouter(conn)
+        self.client_tools.set_terminal_observer(self._stream_router.attach_terminal)
+        self.framework.bind_channel_router(self._stream_router)
 
     async def initialize(
         self,
@@ -526,6 +538,11 @@ class BubACPAgent:
             raise RuntimeError("ACP client is not connected")
         return self._client
 
+    def _require_stream_router(self) -> ACPStreamRouter:
+        if self._stream_router is None:
+            raise RuntimeError("ACP stream router is not connected")
+        return self._stream_router
+
     def _adopt_session(self, session_id: str) -> ACPSession:
         session = ACPSession(session_id=session_id, cwd=self.framework.workspace)
         session.touch()
@@ -582,8 +599,7 @@ class BubACPAgent:
         temp_path.replace(self._session_store_path)
 
     async def _attach_session_history(self, session: ACPSession) -> None:
-        client = self._require_client()
-        router = ACPStreamRouter(client, session.session_id)
+        router = self._require_stream_router()
         inbound = ChannelMessage(
             session_id=session.session_id,
             channel=self.settings.channel_name,
@@ -593,10 +609,13 @@ class BubACPAgent:
             kind="normal",
             context={"acp_session_id": session.session_id},
         )
-        async for _ in router.wrap_stream(
-            inbound, self._session_history_stream(session)
-        ):
-            pass
+        try:
+            async for _ in router.wrap_stream(
+                inbound, self._session_history_stream(session)
+            ):
+                pass
+        finally:
+            router.pop_stream_state(session.session_id)
 
     async def _session_history_stream(
         self, session: ACPSession
@@ -707,27 +726,27 @@ class BubACPAgent:
         client: Client,
     ) -> TurnResult:
         async with self._prompt_lock:
-            router = ACPStreamRouter(client, session.session_id)
-            previous_router = cast(
-                ChannelRouter | None,
-                getattr(self.framework, "_channel_router", None),
-            )
+            router = self._require_stream_router()
             previous_workspace = self.framework.workspace
             self.framework.workspace = session.cwd
-            self.framework.bind_channel_router(router)
             try:
-                with self.client_tools.observe_terminals(router.attach_terminal):
-                    result = await self.framework.process_inbound(
-                        inbound, stream_output=True
-                    )
+                result = await self.framework.process_inbound(
+                    inbound, stream_output=True
+                )
+            except BaseException:
+                router.pop_stream_state(session.session_id)
+                raise
             finally:
-                self.framework.bind_channel_router(previous_router)
                 self.framework.workspace = previous_workspace
-            if result.model_output and not router.sent_text:
+            stream_state = router.pop_stream_state(session.session_id)
+            if result.model_output and not (
+                stream_state is not None and stream_state.sent_text
+            ):
                 await client.session_update(
                     session.session_id, update_agent_message_text(result.model_output)
                 )
-            await self._send_usage_update(client, session.session_id, router.usage)
+            usage = stream_state.usage if stream_state is not None else None
+            await self._send_usage_update(client, session.session_id, usage)
             return result
 
     async def _send_usage_update(
@@ -755,6 +774,13 @@ async def run_acp_agent(
     with replace_builtin_tools(agent.client_tools):
         async with framework.running():
             await run_agent(agent, use_unstable_protocol=use_unstable_protocol)
+
+
+def _message_session_id(message: Envelope) -> str:
+    session_id = field_of(message, "session_id")
+    if session_id is None or not str(session_id).strip():
+        raise RuntimeError("Bub message does not contain a session id")
+    return str(session_id)
 
 
 def _prompt_to_bub_content(prompt: list[ACPPromptBlock]) -> tuple[str, list[MediaItem]]:

@@ -23,7 +23,7 @@ _TOOL_NAMES = (
     "fs.write",
     "fs.edit",
 )
-type TerminalObserver = Callable[[str, str], Awaitable[None]]
+type TerminalObserver = Callable[[str, str, str], Awaitable[None]]
 
 
 class ACPClientToolRuntime:
@@ -38,14 +38,8 @@ class ACPClientToolRuntime:
     def set_capabilities(self, capabilities: ClientCapabilities | None) -> None:
         self._capabilities = capabilities or ClientCapabilities()
 
-    @contextmanager
-    def observe_terminals(self, observer: TerminalObserver) -> Generator[None]:
-        previous_observer = self._terminal_observer
+    def set_terminal_observer(self, observer: TerminalObserver | None) -> None:
         self._terminal_observer = observer
-        try:
-            yield
-        finally:
-            self._terminal_observer = previous_observer
 
     async def read_file(
         self,
@@ -127,7 +121,7 @@ class ACPClientToolRuntime:
             session_id=session_id,
         )
         if self._terminal_observer is not None:
-            await self._terminal_observer(cmd, terminal.terminal_id)
+            await self._terminal_observer(session_id, cmd, terminal.terminal_id)
         if background:
             return f"started: {terminal.terminal_id}"
 

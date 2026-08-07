@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, cast
 
@@ -450,7 +451,7 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
     assert framework.stream_output_values == [True]
     assert framework.messages[0].content == "say hello"
     assert framework.messages[0].channel == "acp-server"
-    assert framework.previous_routers[-1] is None
+    assert framework.previous_routers == [framework.router]
 
     update_names = [update.session_update for _, update in client.updates]
     assert update_names == [
@@ -490,7 +491,7 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
 @pytest.mark.asyncio
 async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
     client = FakeClient()
-    router = ACPStreamRouter(client, "session-1")
+    router = ACPStreamRouter(client)
 
     async def stream():
         yield StreamEvent(
@@ -508,10 +509,10 @@ async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
                 ]
             },
         )
-        await router.attach_terminal("pwd", "terminal-1")
+        await router.attach_terminal("session-1", "pwd", "terminal-1")
         yield StreamEvent("tool_result", {"tool_results": ["/workspace"]})
 
-    async for _ in router.wrap_stream(cast(Any, object()), stream()):
+    async for _ in router.wrap_stream({"session_id": "session-1"}, stream()):
         pass
 
     start = client.updates[0][1]
@@ -527,6 +528,52 @@ async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
     assert result_update.status == "completed"
     assert result_update.raw_output == "/workspace"
     assert result_update.content is None
+
+
+@pytest.mark.asyncio
+async def test_stream_router_isolates_concurrent_session_state() -> None:
+    client = FakeClient()
+    router = ACPStreamRouter(client)
+    both_started = asyncio.Event()
+    started = 0
+
+    async def stream(tool_call_id: str):
+        nonlocal started
+        yield StreamEvent(
+            "tool_call",
+            {
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": "fs.read", "arguments": "{}"},
+                    }
+                ]
+            },
+        )
+        started += 1
+        if started == 2:
+            both_started.set()
+        await both_started.wait()
+        yield StreamEvent("tool_result", {"tool_results": [tool_call_id]})
+
+    async def consume(session_id: str, tool_call_id: str) -> None:
+        async for _ in router.wrap_stream(
+            {"session_id": session_id}, stream(tool_call_id)
+        ):
+            pass
+
+    await asyncio.gather(
+        consume("session-1", "call-1"),
+        consume("session-2", "call-2"),
+    )
+
+    completed_calls = {
+        session_id: update.tool_call_id
+        for session_id, update in client.updates
+        if update.session_update == "tool_call_update"
+    }
+    assert completed_calls == {"session-1": "call-1", "session-2": "call-2"}
 
 
 @pytest.mark.asyncio

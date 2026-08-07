@@ -190,21 +190,24 @@ async def test_replaces_bash_with_acp_terminal_calls(tmp_path: Path) -> None:
 
     client = FakeClient()
     context = _context(tmp_path)
-    observed_terminals: list[tuple[str, str]] = []
+    observed_terminals: list[tuple[str, str, str]] = []
     original = REGISTRY["bash"]
     runtime = _runtime(client)
 
-    async def observe_terminal(command: str, terminal_id: str) -> None:
-        observed_terminals.append((command, terminal_id))
+    async def observe_terminal(
+        session_id: str, command: str, terminal_id: str
+    ) -> None:
+        observed_terminals.append((session_id, command, terminal_id))
 
-    with replace_builtin_tools(runtime), runtime.observe_terminals(observe_terminal):
+    runtime.set_terminal_observer(observe_terminal)
+    with replace_builtin_tools(runtime):
         assert REGISTRY["bash"] is not original
         assert REGISTRY["bash"].parameters == original.parameters
         result = await REGISTRY["bash"].run(cmd="pwd", context=context)
 
     assert REGISTRY["bash"] is original
     assert result == "hello"
-    assert observed_terminals == [("pwd", "terminal-1")]
+    assert observed_terminals == [("session-1", "pwd", "terminal-1")]
     assert client.create_requests == [
         {
             "command": "bash",
