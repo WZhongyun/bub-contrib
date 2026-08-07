@@ -755,6 +755,8 @@ class BubACPAgent:
         session_id: str,
         usage: Mapping[str, object] | None,
     ) -> None:
+        if usage is None:
+            return
         used = _usage_total_tokens(usage)
         if used is None:
             used = 0

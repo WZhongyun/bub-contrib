@@ -462,7 +462,6 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
         "tool_call_update",
         "tool_call_update",
         "agent_message_chunk",
-        "usage_update",
     ]
     assert client.updates[0][1].content.text == "hello"
     thought = client.updates[1][1]
@@ -483,9 +482,7 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
     assert first_result.content[0].content.text == "/workspace"
     assert second_result.tool_call_id == "call-2"
     assert second_result.raw_output == "README content"
-    assert client.updates[-2][1].content.text == " world"
-    assert client.updates[-1][1].used == 0
-    assert client.updates[-1][1].size == 128_000
+    assert client.updates[-1][1].content.text == " world"
 
 
 @pytest.mark.asyncio
@@ -589,4 +586,4 @@ async def test_prompt_sends_complete_output_when_stream_has_no_text_chunks() -> 
     )
 
     assert client.updates[0][1].content.text == "late text"
-    assert client.updates[1][1].session_update == "usage_update"
+    assert len(client.updates) == 1
