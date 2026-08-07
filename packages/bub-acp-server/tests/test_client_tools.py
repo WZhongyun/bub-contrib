@@ -26,6 +26,13 @@ class FakeClient:
         self.output_requests: list[dict[str, object]] = []
         self.kill_requests: list[dict[str, object]] = []
         self.release_requests: list[dict[str, object]] = []
+        self.session_updates: list[tuple[str, object]] = []
+
+    async def session_update(
+        self, session_id: str, update: object, **kwargs: Any
+    ) -> None:
+        del kwargs
+        self.session_updates.append((session_id, update))
 
     async def read_text_file(self, **kwargs: Any) -> ReadTextFileResponse:
         self.read_requests.append(kwargs)
@@ -78,6 +85,16 @@ def _context(tmp_path: Path) -> ToolContext:
             "_runtime_workspace": str(tmp_path),
         },
     )
+
+
+class FakeTape:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object], dict[str, object]]] = []
+
+    async def append_event(
+        self, name: str, payload: dict[str, object], **meta: object
+    ) -> None:
+        self.events.append((name, payload, meta))
 
 
 @pytest.mark.asyncio
@@ -194,9 +211,7 @@ async def test_replaces_bash_with_acp_terminal_calls(tmp_path: Path) -> None:
     original = REGISTRY["bash"]
     runtime = _runtime(client)
 
-    async def observe_terminal(
-        session_id: str, command: str, terminal_id: str
-    ) -> None:
+    async def observe_terminal(session_id: str, command: str, terminal_id: str) -> None:
         observed_terminals.append((session_id, command, terminal_id))
 
     runtime.set_terminal_observer(observe_terminal)
@@ -243,3 +258,87 @@ async def test_background_bash_uses_acp_output_and_kill(tmp_path: Path) -> None:
     assert client.output_requests == [terminal_request, terminal_request]
     assert client.kill_requests == [terminal_request]
     assert client.release_requests == [terminal_request]
+
+
+@pytest.mark.asyncio
+async def test_update_plan_updates_acp_ui_and_persists_tape(tmp_path: Path) -> None:
+    client = FakeClient()
+    tape = FakeTape()
+    context = ToolContext(
+        tape=cast(Any, tape),
+        run_id="run-1",
+        state={"session_id": "session-1", "_runtime_workspace": str(tmp_path)},
+    )
+    assert "update_plan" not in REGISTRY
+
+    with replace_builtin_tools(_runtime(client)):
+        result = await REGISTRY["update_plan"].run(
+            explanation="Start implementation",
+            plan=[
+                {"step": "Inspect the code", "status": "completed"},
+                {
+                    "step": "Implement the change",
+                    "status": "in_progress",
+                    "priority": "high",
+                },
+            ],
+            context=context,
+        )
+
+    assert "update_plan" not in REGISTRY
+    assert result == "Plan updated with 2 steps"
+    assert tape.events == [
+        (
+            "plan",
+            {
+                "entries": [
+                    {
+                        "content": "Inspect the code",
+                        "priority": "medium",
+                        "status": "completed",
+                    },
+                    {
+                        "content": "Implement the change",
+                        "priority": "high",
+                        "status": "in_progress",
+                    },
+                ],
+                "explanation": "Start implementation",
+            },
+            {"run_id": "run-1"},
+        )
+    ]
+    session_id, update = client.session_updates[0]
+    assert session_id == "session-1"
+    assert update.session_update == "plan"
+    assert [entry.content for entry in update.entries] == [
+        "Inspect the code",
+        "Implement the change",
+    ]
+    assert [entry.status for entry in update.entries] == [
+        "completed",
+        "in_progress",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_plan_rejects_multiple_in_progress_steps(tmp_path: Path) -> None:
+    client = FakeClient()
+    tape = FakeTape()
+    context = ToolContext(
+        tape=cast(Any, tape),
+        state={"session_id": "session-1", "_runtime_workspace": str(tmp_path)},
+    )
+
+    with replace_builtin_tools(_runtime(client)):
+        with pytest.raises(ValueError, match="at most one in_progress step"):
+            await REGISTRY["update_plan"].run(
+                plan=[
+                    {"step": "First", "status": "in_progress"},
+                    {"step": "Second", "status": "in_progress"},
+                ],
+                context=context,
+            )
+
+    assert tape.events == []
+    assert client.session_updates == []

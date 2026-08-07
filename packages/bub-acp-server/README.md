@@ -10,6 +10,8 @@ Expose Bub as an Agent Client Protocol agent.
 - ACP agent methods for `initialize`, `session/new`, `session/load`, `session/resume`, `session/list`, `session/close`, and `session/prompt`
 - Streaming ACP `session/update` events from Bub stream events
 - ACP client-backed replacements for Bub's `bash`, `fs.read`, `fs.write`, and `fs.edit` tools while the ACP server is running
+- An ACP-aware `update_plan` tool that updates the client plan UI and records each complete plan as a `plan` event in the session tape
+- Automatic recovery of the latest persisted plan into the next ACP turn's model context
 
 ## Installation
 

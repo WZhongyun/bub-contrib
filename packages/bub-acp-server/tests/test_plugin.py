@@ -9,7 +9,7 @@ import typer
 from acp.schema import TextContentBlock
 from bub.model_selection import ModelChoice, ModelOptions
 from bub.streaming import StreamEvent
-from bub.tape import TapeEntry, TapeQuery
+from bub.tape import TapeContext, TapeEntry, TapeQuery, build_messages
 from bub.turn import TurnResult
 from bub_acp_server import agent as agent_module
 from bub_acp_server import plugin
@@ -197,6 +197,82 @@ def test_register_cli_accepts_only_deprecated_serve_argument(
     assert result.exit_code == exit_code
     assert message in result.output
     assert calls == [framework] * expected_calls
+
+
+def test_plan_prompt_is_only_enabled_for_acp_sessions() -> None:
+    implementation = plugin.ACPServerPlugin(cast(Any, FakeFramework()))
+
+    acp_prompt = implementation.system_prompt(
+        "task", {"context": "acp_session_id=session-1|channel=$acp-server"}
+    )
+    regular_prompt = implementation.system_prompt("task", {"context": "channel=$cli"})
+
+    assert "`update_plan` tool" in acp_prompt
+    assert "complete plan on every update" in acp_prompt
+    assert "latest persisted plan" in acp_prompt
+    assert regular_prompt == ""
+
+
+@pytest.mark.asyncio
+async def test_tape_context_injects_latest_plan_across_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_plan = TapeEntry.event(
+        "plan",
+        {"entries": [{"content": "Old step", "status": "in_progress"}]},
+    )
+    latest_plan = TapeEntry.event(
+        "plan",
+        {
+            "entries": [
+                {
+                    "content": "Current step",
+                    "priority": "high",
+                    "status": "in_progress",
+                }
+            ],
+            "explanation": "Current direction",
+        },
+    )
+    entries = [
+        TapeEntry.message({"role": "user", "content": "Before anchor"}),
+        old_plan,
+        latest_plan,
+        TapeEntry.anchor("handoff"),
+        TapeEntry.message({"role": "user", "content": "After anchor"}),
+    ]
+    implementation = plugin.ACPServerPlugin(cast(Any, FakeFramework()))
+    default_select = plugin.default_tape_context().select
+    assert default_select is not None
+
+    async def async_default_select(
+        selected_entries: object, context: TapeContext
+    ) -> list[dict[str, Any]]:
+        return cast(Any, default_select)(selected_entries, context)
+
+    monkeypatch.setattr(
+        plugin,
+        "default_tape_context",
+        lambda: TapeContext(select=async_default_select),
+    )
+    context = implementation.build_tape_context()
+    context.state["context"] = "acp_session_id=session-1|channel=$acp-server"
+
+    messages = await cast(Any, build_messages(entries, context))
+
+    assert context.anchor is None
+    assert messages[0] == {"role": "user", "content": "After anchor"}
+    assert messages[1]["role"] == "assistant"
+    assert "<current_plan>" in messages[1]["content"]
+    assert '"content": "Current step"' in messages[1]["content"]
+    assert '"explanation": "Current direction"' in messages[1]["content"]
+    assert all("Before anchor" not in message["content"] for message in messages)
+    assert all("Old step" not in message["content"] for message in messages)
+
+    regular_context = implementation.build_tape_context()
+    regular_context.state["context"] = "channel=$cli"
+    regular_messages = await cast(Any, build_messages(entries, regular_context))
+    assert regular_messages == [{"role": "user", "content": "After anchor"}]
 
 
 @pytest.mark.asyncio

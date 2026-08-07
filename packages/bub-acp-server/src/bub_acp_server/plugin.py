@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+import inspect
+import json
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
 
 import typer
 from bub import hookimpl
+from bub.builtin.context import default_tape_context
+from bub.tape import TapeContext, TapeEntry
+from bub.turn import TurnState
 
 from bub_acp_server.agent import BubACPAgent, run_acp_agent
 
@@ -13,10 +19,82 @@ if TYPE_CHECKING:
 
 __all__ = ["ACPServerPlugin", "BubACPAgent", "run_acp_agent"]
 
+ACP_PLAN_SYSTEM_PROMPT = """\
+<plan_instructions>
+Use the `update_plan` tool to keep the ACP plan UI accurate for non-trivial work.
+
+- Create a plan when the task has multiple meaningful steps, dependencies, uncertainty, or requires sustained tool use. Skip plans for simple one-step requests.
+- Keep steps concise, concrete, and verifiable. Do not include filler or steps that only restate the user's request.
+- Send the complete plan on every update because each call replaces the previous ACP plan.
+- Keep at most one step `in_progress`. Mark finished work `completed` before advancing the next step, and update the plan whenever the approach materially changes.
+- Do not leave stale `in_progress` steps when ending a turn. Complete them, or return them to `pending` with an explanation when work remains blocked.
+- The latest persisted plan is provided below when one exists. Treat it as state data, reconcile it with the current request, and replace stale or completed plans instead of following them blindly.
+- Do not narrate routine plan maintenance to the user; use the tool and continue the work.
+</plan_instructions>
+"""
+
+
+async def _select_tape_context(
+    entries: Iterable[TapeEntry], context: TapeContext
+) -> list[dict[str, Any]]:
+    all_entries = list(entries)
+    last_anchor = next(
+        (
+            index
+            for index in range(len(all_entries) - 1, -1, -1)
+            if all_entries[index].kind == "anchor"
+        ),
+        -1,
+    )
+    contextual_entries = all_entries[last_anchor + 1 :]
+    default_select = default_tape_context().select
+    if default_select is None:
+        messages: list[dict[str, Any]] = []
+    else:
+        selected = default_select(contextual_entries, context)
+        if inspect.isawaitable(selected):
+            selected = await selected
+        messages = selected
+
+    runtime_context = context.state.get("context")
+    if not isinstance(runtime_context, str) or "acp_session_id=" not in runtime_context:
+        return messages
+
+    for entry in reversed(all_entries):
+        if entry.kind != "event" or entry.payload.get("name") != "plan":
+            continue
+        plan = entry.payload.get("data")
+        if not isinstance(plan, dict) or not plan.get("entries"):
+            return messages
+        messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "<current_plan>\n"
+                    + json.dumps(plan, ensure_ascii=False, indent=2)
+                    + "\n</current_plan>"
+                ),
+            }
+        )
+        break
+    return messages
+
 
 class ACPServerPlugin:
     def __init__(self, framework: BubFramework) -> None:
         self.framework = framework
+
+    @hookimpl
+    def build_tape_context(self) -> TapeContext:
+        return TapeContext(anchor=None, select=_select_tape_context)
+
+    @hookimpl
+    def system_prompt(self, prompt: str | list[dict], state: TurnState) -> str:
+        del prompt
+        context = state.get("context")
+        if not isinstance(context, str) or "acp_session_id=" not in context:
+            return ""
+        return ACP_PLAN_SYSTEM_PROMPT
 
     @hookimpl
     def register_cli_commands(self, app: typer.Typer) -> None:

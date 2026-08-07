@@ -170,6 +170,39 @@ async def test_acp_prompt_executes_bub_tools_through_client(tmp_path: Path) -> N
     assert payload["bash"] == "e2e-command"
     assert payload["write"] == f"wrote: {created_path}"
     assert payload["edit"] == f"edited: {target_path}"
+    assert payload["plan"] == "Plan updated with 2 steps"
+    assert payload["tape_events"] == [
+        {
+            "name": "plan",
+            "payload": {
+                "entries": [
+                    {
+                        "content": "Exercise client tools",
+                        "priority": "medium",
+                        "status": "completed",
+                    },
+                    {
+                        "content": "Verify results",
+                        "priority": "medium",
+                        "status": "in_progress",
+                    },
+                ],
+                "explanation": "Exercise ACP plan updates",
+            },
+            "meta": {"run_id": "e2e-run"},
+        }
+    ]
+
+    plan_updates = [
+        update
+        for _, update in client.session_updates
+        if update.session_update == "plan"
+    ]
+    assert len(plan_updates) == 1
+    assert [entry.content for entry in plan_updates[0].entries] == [
+        "Exercise client tools",
+        "Verify results",
+    ]
 
     usage_update = client.session_updates[-1][1]
     assert usage_update.session_update == "usage_update"

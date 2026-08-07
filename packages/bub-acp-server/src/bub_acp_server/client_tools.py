@@ -6,13 +6,16 @@ from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
+from typing import Literal
 
+from acp.helpers import plan_entry, update_plan as acp_update_plan
 from acp.interfaces import Client
 from acp.schema import (
     ClientCapabilities,
     TerminalOutputResponse,
     WaitForTerminalExitResponse,
 )
+from pydantic import BaseModel, Field
 from bub.tools import REGISTRY, Tool, ToolContext, tool
 
 _TOOL_NAMES = (
@@ -22,8 +25,22 @@ _TOOL_NAMES = (
     "fs.read",
     "fs.write",
     "fs.edit",
+    "update_plan",
 )
 type TerminalObserver = Callable[[str, str, str], Awaitable[None]]
+type PlanStatus = Literal["pending", "in_progress", "completed"]
+type PlanPriority = Literal["high", "medium", "low"]
+
+
+class PlanItem(BaseModel):
+    step: str = Field(min_length=1)
+    status: PlanStatus
+    priority: PlanPriority = "medium"
+
+
+class PlanInput(BaseModel):
+    explanation: str | None = None
+    plan: list[PlanItem]
 
 
 class ACPClientToolRuntime:
@@ -191,6 +208,43 @@ class ACPClientToolRuntime:
         finally:
             await client.release_terminal(session_id=session_id, terminal_id=shell_id)
 
+    async def update_plan(
+        self,
+        request: PlanInput,
+        context: ToolContext,
+    ) -> str:
+        plan = request.plan
+        in_progress = sum(item.status == "in_progress" for item in plan)
+        if in_progress > 1:
+            raise ValueError("plan must contain at most one in_progress step")
+
+        entries = [
+            plan_entry(
+                item.step,
+                priority=item.priority,
+                status=item.status,
+            )
+            for item in plan
+        ]
+        payload: dict[str, object] = {
+            "entries": [
+                {
+                    "content": item.step,
+                    "priority": item.priority,
+                    "status": item.status,
+                }
+                for item in plan
+            ]
+        }
+        if request.explanation:
+            payload["explanation"] = request.explanation
+
+        await context.tape.append_event("plan", payload, run_id=context.run_id)
+        await self._require_client().session_update(
+            _session_id(context), acp_update_plan(entries)
+        )
+        return f"Plan updated with {len(plan)} steps"
+
     def _require_client(self) -> Client:
         if self._client is None:
             raise RuntimeError("ACP client is not connected")
@@ -206,12 +260,16 @@ class ACPClientToolRuntime:
 @contextmanager
 def replace_builtin_tools(runtime: ACPClientToolRuntime) -> Generator[None]:
     import_module("bub.builtin.tools")
-    originals = {name: REGISTRY[name] for name in _TOOL_NAMES}
+    originals = {name: REGISTRY.get(name) for name in _TOOL_NAMES}
     _register_replacements(runtime)
     try:
         yield
     finally:
-        REGISTRY.update(originals)
+        for name, original in originals.items():
+            if original is None:
+                REGISTRY.pop(name, None)
+            else:
+                REGISTRY[name] = original
 
 
 def _register_replacements(runtime: ACPClientToolRuntime) -> dict[str, Tool]:
@@ -276,9 +334,26 @@ def _register_replacements(runtime: ACPClientToolRuntime) -> dict[str, Tool]:
         """Edit a text file through the ACP client filesystem."""
         return await runtime.edit_file(path, old, new, start, context)
 
+    @tool(name="update_plan", context=True, model=PlanInput)
+    async def update_plan_tool(
+        request: PlanInput,
+        *,
+        context: ToolContext,
+    ) -> str:
+        """Replace the ACP session plan and persist it to the current tape."""
+        return await runtime.update_plan(request, context)
+
     return {
         tool_item.name: tool_item
-        for tool_item in (bash, bash_output, kill_bash, fs_read, fs_write, fs_edit)
+        for tool_item in (
+            bash,
+            bash_output,
+            kill_bash,
+            fs_read,
+            fs_write,
+            fs_edit,
+            update_plan_tool,
+        )
     }
 
 

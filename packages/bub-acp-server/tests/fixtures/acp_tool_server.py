@@ -14,6 +14,16 @@ from bub.turn import TurnResult
 from bub_acp_server.agent import run_acp_agent
 
 
+class E2ETape:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    async def append_event(
+        self, name: str, payload: dict[str, object], **meta: object
+    ) -> None:
+        self.events.append({"name": name, "payload": payload, "meta": meta})
+
+
 class E2EFramework:
     def __init__(self) -> None:
         self.workspace = Path(os.environ["BUB_ACP_E2E_WORKSPACE"]).resolve()
@@ -39,8 +49,10 @@ class E2EFramework:
         self, inbound: Any, stream_output: bool = False
     ) -> TurnResult:
         assert stream_output is True
+        tape = E2ETape()
         context = ToolContext(
-            tape=cast(Any, object()),
+            tape=cast(Any, tape),
+            run_id="e2e-run",
             state={
                 "session_id": inbound.session_id,
                 "_runtime_workspace": str(self.workspace),
@@ -62,12 +74,22 @@ class E2EFramework:
         bash_result = await REGISTRY["bash"].run(
             cmd="printf e2e-command", context=context
         )
+        plan_result = await REGISTRY["update_plan"].run(
+            explanation="Exercise ACP plan updates",
+            plan=[
+                {"step": "Exercise client tools", "status": "completed"},
+                {"step": "Verify results", "status": "in_progress"},
+            ],
+            context=context,
+        )
         model_output = json.dumps(
             {
                 "read": read_result,
                 "write": write_result,
                 "edit": edit_result,
                 "bash": bash_result,
+                "plan": plan_result,
+                "tape_events": tape.events,
             },
             sort_keys=True,
         )
