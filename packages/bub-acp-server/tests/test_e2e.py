@@ -208,3 +208,54 @@ async def test_acp_prompt_executes_bub_tools_through_client(tmp_path: Path) -> N
     assert usage_update.session_update == "usage_update"
     assert usage_update.used == 34
     assert usage_update.size == 128_000
+
+
+@pytest.mark.asyncio
+async def test_idle_steering_starts_turn_over_extension_route(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target_path = workspace / "target.txt"
+    client = E2EClient({str(target_path): "before\nold value\nafter\n"})
+    server_script = Path(__file__).parent / "fixtures" / "acp_tool_server.py"
+
+    async with spawn_agent_process(
+        client,
+        sys.executable,
+        str(server_script),
+        env={
+            "BUB_ACP_E2E_WORKSPACE": str(workspace),
+            "BUB_HOME": str(tmp_path / ".bub"),
+        },
+        use_unstable_protocol=True,
+    ) as (connection, process):
+        async with asyncio.timeout(10):
+            initialized = await connection.initialize(
+                protocol_version=PROTOCOL_VERSION,
+                client_capabilities=ClientCapabilities(
+                    fs={"readTextFile": True, "writeTextFile": True},
+                    terminal=True,
+                ),
+            )
+            session = await connection.new_session(cwd=str(workspace))
+            response = await connection.ext_method(
+                "session/steering",
+                {
+                    "sessionId": session.session_id,
+                    "prompt": [{"type": "text", "text": "exercise client tools"}],
+                },
+            )
+            while not any(
+                update.session_update == "usage_update"
+                for _, update in client.session_updates
+            ):
+                await asyncio.sleep(0)
+
+        assert process.returncode is None
+        assert initialized.field_meta == {"steering": {"supported": True}}
+        assert response == {"outcome": "startedNewTurn"}
+
+    assert any(
+        update.session_update == "agent_message_chunk"
+        for _, update in client.session_updates
+    )
+    assert client.session_updates[-1][1].session_update == "usage_update"

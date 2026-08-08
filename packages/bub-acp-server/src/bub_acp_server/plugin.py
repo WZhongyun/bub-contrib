@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import typer
 from bub import hookimpl
 from bub.builtin.context import default_tape_context
+from bub.envelope import Envelope, field_of
 from bub.tape import TapeContext, TapeEntry
 from bub.turn import TurnState
 
 from bub_acp_server.agent import BubACPAgent, run_acp_agent
+from bub_acp_server.steering import ACPSteeringInbox
 
 if TYPE_CHECKING:
     from bub.framework import BubFramework
@@ -70,6 +72,22 @@ async def _select_tape_context(
 class ACPServerPlugin:
     def __init__(self, framework: BubFramework) -> None:
         self.framework = framework
+        self.steering_inbox = ACPSteeringInbox()
+
+    @hookimpl(tryfirst=True)
+    def provide_steering_inbox(self) -> ACPSteeringInbox:
+        return self.steering_inbox
+
+    @hookimpl
+    def load_state(self, message: Envelope, session_id: str) -> TurnState:
+        del session_id
+        context = field_of(message, "context", {})
+        if not isinstance(context, Mapping):
+            return {}
+        workspace = context.get("_runtime_workspace")
+        if not isinstance(workspace, str) or not workspace:
+            return {}
+        return {"_runtime_workspace": workspace}
 
     @hookimpl
     def build_tape_context(self) -> TapeContext:

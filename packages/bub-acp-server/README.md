@@ -12,6 +12,7 @@ Expose Bub as an Agent Client Protocol agent.
 - ACP client-backed replacements for Bub's `bash`, `fs.read`, `fs.write`, and `fs.edit` tools while the ACP server is running
 - An ACP-aware `update_plan` tool that updates the client plan UI and records each complete plan as a `plan` event in the session tape
 - Automatic recovery of the latest persisted plan into the next ACP turn's model context
+- Mid-turn steering through the `_session/steering` ACP extension
 
 ## Installation
 
@@ -52,6 +53,39 @@ ACP session IDs remain the protocol-facing `chat_id`. Bub namespaces its interna
 ACP session metadata is stored under Bub home as `acp-sessions.json` so compatible clients can list sessions again after restarting. Keep `BUB_HOME` stable if you want the same ACP thread list across editor launches.
 
 `bub-acp-server` supports both ACP session load and resume. `session/load` restores the matching Bub history through the same ACP streaming path used by live turns. `session/resume` attaches the editor back to the Bub session without replaying history, so later turns keep streaming through Bub's normal hook pipeline.
+
+## Steering
+
+Clients can detect steering support in the initialize response:
+
+```json
+{
+  "_meta": {
+    "steering": {
+      "supported": true
+    }
+  }
+}
+```
+
+Send a private ACP extension request while a turn is running or after it has become idle:
+
+```json
+{
+  "method": "_session/steering",
+  "params": {
+    "sessionId": "session-id",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Stop the current approach and inspect the failing test first."
+      }
+    ]
+  }
+}
+```
+
+The response outcome is `injected` when Bub consumes the message at the next model-step boundary, `startedNewTurn` when the previous turn has already passed its final boundary, or `failed` for an unexpected internal failure. Steering requests are serialized per session and preserve arrival order. The extension is private rather than part of the standard ACP method set, so clients must opt into it explicitly.
 
 ## Use In Zed
 

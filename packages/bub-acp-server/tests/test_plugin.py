@@ -46,6 +46,7 @@ class FakeFramework:
         self.previous_routers: list[object] = []
         self.messages: list[object] = []
         self.stream_output_values: list[bool] = []
+        self.workspaces_during_process: list[Path] = []
 
     def bind_channel_router(self, router: object) -> None:
         self.previous_routers.append(router)
@@ -64,6 +65,7 @@ class FakeFramework:
     ) -> TurnResult:
         self.messages.append(inbound)
         self.stream_output_values.append(stream_output)
+        self.workspaces_during_process.append(self.workspace)
 
         async def stream():
             yield StreamEvent("text", {"delta": "hello"})
@@ -293,6 +295,7 @@ async def test_initialize_advertises_session_capabilities() -> None:
     assert response.agent_capabilities.session_capabilities.close is not None
     assert response.agent_capabilities.session_capabilities.resume is not None
     assert response.agent_capabilities.load_session is True
+    assert response.field_meta == {"steering": {"supported": True}}
 
 
 @pytest.mark.asyncio
@@ -451,6 +454,7 @@ def test_model_options_fall_back_when_persisted_model_is_unavailable(
 @pytest.mark.asyncio
 async def test_prompt_passes_model_selection_to_bub_context(tmp_path: Path) -> None:
     framework = ConfigFramework()
+    framework_workspace = framework.workspace
     client = FakeClient()
     agent = BubACPAgent(framework)
     agent.on_connect(client)
@@ -467,10 +471,13 @@ async def test_prompt_passes_model_selection_to_bub_context(tmp_path: Path) -> N
     )
 
     assert framework.messages[0].context["model"] == "anthropic:claude-sonnet-4-5"
+    assert framework.messages[0].context["_runtime_workspace"] == str(tmp_path)
     assert framework.messages[0].context["chat_id"] == created.session_id
     assert "acp_session_id" not in framework.messages[0].context
     assert framework.messages[0].session_id == f"acp-server:{created.session_id}"
     assert not hasattr(framework.messages[0], "runtime")
+    assert framework.workspaces_during_process == [framework_workspace]
+    assert framework.workspace == framework_workspace
 
 
 @pytest.mark.asyncio
