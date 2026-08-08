@@ -184,12 +184,13 @@ class ACPStreamState:
     terminal_tool_indices: set[int] = field(default_factory=set)
     next_tool_index: int = 0
     sent_text: bool = False
-    usage: Mapping[str, object] | None = None
+    reported_usage: tuple[int, int] | None = None
 
 
 class ACPStreamRouter:
-    def __init__(self, client: Client) -> None:
+    def __init__(self, client: Client, *, context_window_size: int = 128_000) -> None:
         self._client = client
+        self._context_window_size = context_window_size
         self._stream_states: dict[str, ACPStreamState] = {}
 
     def wrap_stream(
@@ -203,11 +204,16 @@ class ACPStreamRouter:
             try:
                 async for event in stream:
                     await self.publish_event(session_id, event)
+                    await self._publish_usage_if_changed(
+                        session_id,
+                        state,
+                        _event_usage(event) or getattr(stream, "usage", None),
+                    )
                     yield event
             finally:
-                usage = getattr(stream, "usage", None)
-                if isinstance(usage, Mapping):
-                    state.usage = usage
+                await self._publish_usage_if_changed(
+                    session_id, state, getattr(stream, "usage", None)
+                )
 
         return iterator()
 
@@ -246,6 +252,30 @@ class ACPStreamRouter:
                 event.data.get("message") or event.data.get("error") or "unknown error"
             )
             await self._send_agent_text(session_id, f"\nError: {message}")
+
+    async def _publish_usage_if_changed(
+        self,
+        session_id: str,
+        state: ACPStreamState,
+        usage: object,
+    ) -> None:
+        if not isinstance(usage, Mapping):
+            return
+
+        used = _usage_total_tokens(usage)
+        if used is None:
+            used = 0
+        reported_size = _usage_context_window_size(usage)
+        size = max(used, reported_size or self._context_window_size)
+        snapshot = (used, size)
+        if snapshot == state.reported_usage:
+            return
+
+        state.reported_usage = snapshot
+        await self._client.session_update(
+            session_id,
+            UsageUpdate(session_update="usage_update", size=size, used=used),
+        )
 
     async def _send_agent_text(self, session_id: str, text: str) -> None:
         if not text:
@@ -392,7 +422,9 @@ class BubACPAgent:
     def on_connect(self, conn: Client) -> None:
         self._client = conn
         self.client_tools.connect(conn)
-        self._stream_router = ACPStreamRouter(conn)
+        self._stream_router = ACPStreamRouter(
+            conn, context_window_size=self.settings.context_window_size
+        )
         self.client_tools.set_terminal_observer(self._stream_router.attach_terminal)
         self.framework.bind_channel_router(self._stream_router)
 
@@ -969,28 +1001,7 @@ class BubACPAgent:
                 await client.session_update(
                     session.session_id, update_agent_message_text(result.model_output)
                 )
-            usage = stream_state.usage if stream_state is not None else None
-            await self._send_usage_update(client, session.session_id, usage)
             return result
-
-    async def _send_usage_update(
-        self,
-        client: Client,
-        session_id: str,
-        usage: Mapping[str, object] | None,
-    ) -> None:
-        if usage is None:
-            return
-        used = _usage_total_tokens(usage)
-        if used is None:
-            used = 0
-
-        reported_size = _usage_context_window_size(usage)
-        size = max(used, reported_size or self.settings.context_window_size)
-        await client.session_update(
-            session_id,
-            UsageUpdate(session_update="usage_update", size=size, used=used),
-        )
 
 
 async def run_acp_agent(
@@ -1139,6 +1150,13 @@ def _int_value(value: object, *, default: int) -> int:
     with contextlib.suppress(TypeError, ValueError):
         return int(value)
     return default
+
+
+def _event_usage(event: StreamEvent) -> object:
+    if event.kind != "usage":
+        return None
+    nested_usage = event.data.get("usage")
+    return nested_usage if isinstance(nested_usage, Mapping) else event.data
 
 
 def _usage_total_tokens(usage: Mapping[str, object] | None) -> int | None:

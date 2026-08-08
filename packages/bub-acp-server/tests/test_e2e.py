@@ -204,8 +204,11 @@ async def test_acp_prompt_executes_bub_tools_through_client(tmp_path: Path) -> N
         "Verify results",
     ]
 
-    usage_update = client.session_updates[-1][1]
-    assert usage_update.session_update == "usage_update"
+    usage_update = next(
+        update
+        for _, update in client.session_updates
+        if update.session_update == "usage_update"
+    )
     assert usage_update.used == 34
     assert usage_update.size == 128_000
 
@@ -258,4 +261,7 @@ async def test_idle_steering_starts_turn_over_extension_route(tmp_path: Path) ->
         update.session_update == "agent_message_chunk"
         for _, update in client.session_updates
     )
-    assert client.session_updates[-1][1].session_update == "usage_update"
+    assert any(
+        update.session_update == "usage_update"
+        for _, update in client.session_updates
+    )

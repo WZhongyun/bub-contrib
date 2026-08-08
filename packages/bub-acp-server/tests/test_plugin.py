@@ -8,7 +8,7 @@ import pytest
 import typer
 from acp.schema import TextContentBlock
 from bub.model_selection import ModelChoice, ModelOptions
-from bub.streaming import StreamEvent
+from bub.streaming import AsyncStreamEvents, StreamEvent, StreamState
 from bub.tape import (
     LAST_ANCHOR,
     InMemoryTapeStore,
@@ -663,6 +663,57 @@ async def test_stream_router_isolates_concurrent_session_state() -> None:
         if update.session_update == "tool_call_update"
     }
     assert completed_calls == {"session-1": "call-1", "session-2": "call-2"}
+
+
+@pytest.mark.asyncio
+async def test_stream_router_reports_usage_before_turn_finishes() -> None:
+    client = FakeClient()
+    router = ACPStreamRouter(client, context_window_size=100)
+    stream_state = StreamState()
+    release_turn = asyncio.Event()
+
+    async def stream():
+        yield StreamEvent("text", {"delta": "first"})
+        stream_state.usage = {"prompt_tokens": 10, "completion_tokens": 1}
+        yield StreamEvent("reasoning", {"delta": "working"})
+        await release_turn.wait()
+        stream_state.usage = {"prompt_tokens": 10, "completion_tokens": 2}
+        yield StreamEvent("text", {"delta": "second"})
+
+    events = AsyncStreamEvents(stream(), state=stream_state)
+
+    async def consume() -> None:
+        async for _ in router.wrap_stream({"chat_id": "session-1"}, events):
+            pass
+
+    task = asyncio.create_task(consume())
+    async with asyncio.timeout(1):
+        while not any(
+            update.session_update == "usage_update" for _, update in client.updates
+        ):
+            await asyncio.sleep(0)
+
+    first_usage = next(
+        update
+        for _, update in client.updates
+        if update.session_update == "usage_update"
+    )
+    assert first_usage.used == 11
+    assert first_usage.size == 100
+    assert not task.done()
+
+    release_turn.set()
+    await task
+
+    usage_updates = [
+        update
+        for _, update in client.updates
+        if update.session_update == "usage_update"
+    ]
+    assert [(update.used, update.size) for update in usage_updates] == [
+        (11, 100),
+        (12, 100),
+    ]
 
 
 @pytest.mark.asyncio
