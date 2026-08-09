@@ -88,6 +88,17 @@ type ACPPromptBlock = (
 type ACPMcpServer = HttpMcpServer | SseMcpServer | McpServerStdio
 type StreamPayload = Mapping[str, object]
 
+REASONING_EFFORT_CONFIG_ID = "reasoning_effort"
+REASONING_EFFORT_OPTIONS = (
+    ("auto", "Auto"),
+    ("none", "None"),
+    ("minimal", "Minimal"),
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra high"),
+)
+
 _PROMPT_ADAPTER = TypeAdapter(list[ACPPromptBlock])
 
 logger = logging.getLogger(__name__)
@@ -569,7 +580,9 @@ class BubACPAgent:
         del kwargs
         session = self._sessions.get(session_id) or self._adopt_session(session_id)
         session.touch()
-        config_options = await self._set_session_model_option(session, config_id, value)
+        config_options = await self._set_session_config_option(
+            session, config_id, value
+        )
         self._save_sessions()
         return SetSessionConfigOptionResponse(config_options=config_options)
 
@@ -721,6 +734,8 @@ class BubACPAgent:
         context: dict[str, str] = {}
         if model := session.runtime.get("model"):
             context["model"] = model
+        if reasoning_effort := session.runtime.get(REASONING_EFFORT_CONFIG_ID):
+            context[REASONING_EFFORT_CONFIG_ID] = reasoning_effort
         context["_runtime_workspace"] = str(session.cwd)
         return ChannelMessage(
             session_id=_bub_session_id(self.settings.channel_name, session.session_id),
@@ -927,29 +942,28 @@ class BubACPAgent:
 
     async def _session_config_options(
         self, session: ACPSession
-    ) -> list[SessionConfigOptionSelect] | None:
+    ) -> list[SessionConfigOptionSelect]:
         model_options = await self.framework.get_model_options(
             session_id=_bub_session_id(self.settings.channel_name, session.session_id),
             workspace=session.cwd,
         )
         acp_options = _model_options_to_acp_config_options(model_options, session)
-        return acp_options or None
+        acp_options.append(_reasoning_effort_config_option(session))
+        return acp_options
 
-    async def _set_session_model_option(
+    async def _set_session_config_option(
         self,
         session: ACPSession,
         config_id: str,
         value: str | bool,
     ) -> list[SessionConfigOptionSelect]:
-        if config_id != "model":
-            raise ValueError(f"unknown ACP config option: {config_id}")
         if not isinstance(value, str):
             raise ValueError(
                 f"invalid value for ACP config option {config_id}: {value}"
             )
         config_options = await self._session_config_options(session)
         selected_option = next(
-            (option for option in config_options or [] if option.id == "model"),
+            (option for option in config_options if option.id == config_id),
             None,
         )
         if selected_option is None:
@@ -959,9 +973,9 @@ class BubACPAgent:
             raise ValueError(
                 f"invalid value for ACP config option {config_id}: {value}"
             )
-        session.runtime["model"] = value
+        session.runtime[config_id] = value
         selected_option.current_value = value
-        return config_options or []
+        return config_options
 
     async def _send_user_message_updates(
         self, prompt: list[ACPPromptBlock], session_id: str
@@ -1242,6 +1256,27 @@ def _model_choice_to_acp_option(choice: ModelChoice) -> SessionConfigSelectOptio
         name=choice.name or choice.id,
         description=choice.description,
         field_meta=dict(choice.meta) if choice.meta is not None else None,
+    )
+
+
+def _reasoning_effort_config_option(
+    session: ACPSession,
+) -> SessionConfigOptionSelect:
+    allowed_values = {value for value, _ in REASONING_EFFORT_OPTIONS}
+    current_value = session.runtime.get(REASONING_EFFORT_CONFIG_ID, "auto")
+    if current_value not in allowed_values:
+        current_value = "auto"
+    return SessionConfigOptionSelect(
+        type="select",
+        id=REASONING_EFFORT_CONFIG_ID,
+        name="Reasoning effort",
+        description="How much reasoning effort the model should use",
+        category="thought_level",
+        current_value=current_value,
+        options=[
+            SessionConfigSelectOption(value=value, name=name)
+            for value, name in REASONING_EFFORT_OPTIONS
+        ],
     )
 
 

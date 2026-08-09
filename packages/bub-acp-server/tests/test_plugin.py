@@ -396,16 +396,73 @@ async def test_session_lifecycle_returns_config_options(tmp_path: Path) -> None:
     assert created.config_options[0].name == "Model"
     assert created.config_options[0].current_value == "openai:gpt-5"
     assert created.config_options[0].options[0].value == "openai:gpt-5"
-    assert len(created.config_options) == 1
+    assert created.config_options[1].id == "reasoning_effort"
+    assert created.config_options[1].name == "Reasoning effort"
+    assert created.config_options[1].category == "thought_level"
+    assert created.config_options[1].current_value == "auto"
+    assert [option.value for option in created.config_options[1].options] == [
+        "auto",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    assert len(created.config_options) == 2
     assert loaded.config_options is not None
-    assert loaded.config_options[0].id == "model"
+    assert [option.id for option in loaded.config_options] == [
+        "model",
+        "reasoning_effort",
+    ]
     assert resumed.config_options is not None
-    assert resumed.config_options[0].id == "model"
+    assert [option.id for option in resumed.config_options] == [
+        "model",
+        "reasoning_effort",
+    ]
     assert framework.model_queries == [
         (f"acp-server:{created.session_id}", tmp_path),
         (f"acp-server:{created.session_id}", tmp_path),
         (f"acp-server:{created.session_id}", tmp_path),
     ]
+
+
+@pytest.mark.asyncio
+async def test_set_reasoning_effort_updates_session_runtime_and_config_option(
+    tmp_path: Path,
+) -> None:
+    framework = ConfigFramework()
+    agent = BubACPAgent(framework)
+    created = await agent.new_session(cwd=str(tmp_path))
+
+    response = await agent.set_config_option(
+        config_id="reasoning_effort",
+        session_id=created.session_id,
+        value="high",
+    )
+
+    assert agent._sessions[created.session_id].runtime == {
+        "reasoning_effort": "high"
+    }
+    reasoning_option = next(
+        option
+        for option in response.config_options
+        if option.id == "reasoning_effort"
+    )
+    assert reasoning_option.current_value == "high"
+
+
+@pytest.mark.asyncio
+async def test_set_reasoning_effort_rejects_unsupported_value(tmp_path: Path) -> None:
+    agent = BubACPAgent(ConfigFramework())
+    created = await agent.new_session(cwd=str(tmp_path))
+
+    with pytest.raises(ValueError, match="invalid value"):
+        await agent.set_config_option(
+            config_id="reasoning_effort",
+            session_id=created.session_id,
+            value="extreme",
+        )
 
 
 @pytest.mark.asyncio
@@ -452,7 +509,7 @@ def test_model_options_fall_back_when_persisted_model_is_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_prompt_passes_model_selection_to_bub_context(tmp_path: Path) -> None:
+async def test_prompt_passes_session_config_to_bub_context(tmp_path: Path) -> None:
     framework = ConfigFramework()
     framework_workspace = framework.workspace
     client = FakeClient()
@@ -464,6 +521,11 @@ async def test_prompt_passes_model_selection_to_bub_context(tmp_path: Path) -> N
         session_id=created.session_id,
         value="anthropic:claude-sonnet-4-5",
     )
+    await agent.set_config_option(
+        config_id="reasoning_effort",
+        session_id=created.session_id,
+        value="high",
+    )
 
     await agent.prompt(
         [TextContentBlock(type="text", text="hello")],
@@ -471,6 +533,7 @@ async def test_prompt_passes_model_selection_to_bub_context(tmp_path: Path) -> N
     )
 
     assert framework.messages[0].context["model"] == "anthropic:claude-sonnet-4-5"
+    assert framework.messages[0].context["reasoning_effort"] == "high"
     assert framework.messages[0].context["_runtime_workspace"] == str(tmp_path)
     assert framework.messages[0].context["chat_id"] == created.session_id
     assert "acp_session_id" not in framework.messages[0].context

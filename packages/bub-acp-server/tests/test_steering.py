@@ -358,9 +358,13 @@ async def test_plugin_steering_inbox_precedes_builtin_provider(
                 channel="acp-server",
                 chat_id="session",
                 content="hello",
-                context={"_runtime_workspace": str(tmp_path)},
+                context={
+                    "_runtime_workspace": str(tmp_path),
+                    "reasoning_effort": "high",
+                },
             ),
             "acp-server:session",
         )
 
     assert state["_runtime_workspace"] == str(tmp_path)
+    assert state["reasoning_effort"] == "high"

@@ -84,10 +84,14 @@ class ACPServerPlugin:
         context = field_of(message, "context", {})
         if not isinstance(context, Mapping):
             return {}
+        state: TurnState = {}
         workspace = context.get("_runtime_workspace")
-        if not isinstance(workspace, str) or not workspace:
-            return {}
-        return {"_runtime_workspace": workspace}
+        if isinstance(workspace, str) and workspace:
+            state["_runtime_workspace"] = workspace
+        reasoning_effort = context.get("reasoning_effort")
+        if isinstance(reasoning_effort, str) and reasoning_effort:
+            state["reasoning_effort"] = reasoning_effort
+        return state
 
     @hookimpl
     def build_tape_context(self) -> TapeContext:
