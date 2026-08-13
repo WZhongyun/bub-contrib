@@ -1,0 +1,265 @@
+# bub-qq
+
+面向 [Bub](https://bub.build) 的 QQ 开放平台 Channel 适配器。
+
+English documentation: [README.md](./README.md)
+
+## 功能概览
+
+- Bub 通道插件（入口点：`qq` → `bub_qq.plugin`）
+- 将单聊入站事件 `C2C_MESSAGE_CREATE` 适配为 Bub `ChannelMessage`
+- 通过 QQ OpenAPI 发送单聊文本回复（仅被动回复）
+- 接收模式切换：**webhook** 或 **websocket**（QQ 平台侧二者互斥）
+- 提供 `onboard_config`，`bub onboard` 可采集 `appid` / `secret` / `receive_mode`
+- 随包提供 skill 资源：`src/skills/qq`
+
+当前重点是 **单聊（C2C）收发**。群聊 / 频道等能力尚未覆盖。
+
+## 前置条件
+
+1. [安装 Bub](https://bub.build/zh-cn/docs/getting-started/install/)（推荐：`uv tool install bub`）
+2. 执行 `bub onboard`，确认模型可用（`bub chat` 或 `bub run`）
+3. 在 [QQ 开放平台 / 机器人文档](https://bot.q.qq.com/wiki/develop/api-v2/) 创建机器人，获取 `APPID`、`SECRET`
+
+## 安装（终端用户）
+
+`bub-qq` 尚未发布到 PyPI。若已用 `uv tool install bub` 全局安装 Bub，请用 **`bub install` 把插件装进 Bub 自己的环境**：
+
+```bash
+bub install bub-qq@main
+```
+
+该写法会解析为官方 monorepo 子包：
+
+```text
+git+https://github.com/bubbuild/bub-contrib.git@main#subdirectory=packages/bub-qq
+```
+
+等价写法：
+
+```bash
+# 完整 Git URL（传给 bub install 时用 https:// 开头，不要写 git+https://）
+bub install "https://github.com/bubbuild/bub-contrib.git#subdirectory=packages/bub-qq"
+
+# 有 tag / commit 时可固定版本
+bub install bub-qq@<tag-or-sha>
+```
+
+验证是否加载：
+
+```bash
+bub hooks
+```
+
+应能在已发现的插件 / hook 实现中看到 `qq`。
+
+### 升级 / 卸载
+
+```bash
+bub update bub-qq
+bub uninstall bub-qq
+```
+
+### 说明
+
+- **不要**写裸的 `bub install bub-qq`。不带 `@ref` 的名字会被当成 PyPI 包名。
+- `bub install` 要求 Bub 运行在虚拟环境中（包含 `uv tool install bub` 创建的环境），且本机 `PATH` 上有 `uv`。
+
+## 安装（本地开发）
+
+将插件以 **editable** 方式装进「实际运行 `bub` 的那个环境」。
+
+### 方式 A — 全局 Bub（`uv tool`）
+
+```bash
+uv pip install -e /path/to/bub-contrib/packages/bub-qq \
+  --python ~/.local/share/uv/tools/bub/bin/python
+```
+
+之后照常使用全局命令：
+
+```bash
+bub hooks
+bub gateway
+```
+
+### 方式 B — Bub / monorepo 项目 venv
+
+在已依赖 Bub 的 uv 项目中：
+
+```bash
+uv add --editable /path/to/bub-contrib/packages/bub-qq
+# 或在 bub-contrib 工作流中：
+uv pip install -e packages/bub-qq
+```
+
+### 方式 C — 指定解释器从 Git 安装
+
+```bash
+uv pip install \
+  "git+https://github.com/bubbuild/bub-contrib.git#subdirectory=packages/bub-qq" \
+  --python /path/to/the/python/that/runs/bub
+```
+
+## 配置
+
+配置可来自：
+
+- `~/.bub/config.yml` 中的 `qq:` 段
+- `BUB_QQ_*` 环境变量（含从 `.env` 加载的值）
+- `bub onboard`：当 `qq` 通道启用时，交互采集必填项
+
+环境变量会覆盖 YAML，因此共享策略可放在 `config.yml`，密钥放在环境变量中。
+
+### 必填
+
+| YAML 字段（`qq.*`） | 环境变量 | 说明 |
+| --- | --- | --- |
+| `appid` | `BUB_QQ_APPID` | QQ 机器人 AppID |
+| `secret` | `BUB_QQ_SECRET` | QQ 机器人 Secret |
+| `receive_mode` | `BUB_QQ_RECEIVE_MODE` | 入站传输：`webhook` 或 `websocket` |
+
+`receive_mode` 必须与 QQ 开发者后台一致：
+
+- `webhook` — 仅启动内嵌 webhook 服务，不启 WebSocket
+- `websocket` — 仅启动 WebSocket 客户端，不启内嵌 webhook
+
+QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 回调地址后，平台侧通常不再支持 WebSocket 投递。
+
+若 `appid` / `secret` 为空，或 `receive_mode` 不是 `webhook` / `websocket`，gateway 启动会失败。
+
+### 可选
+
+| YAML 字段（`qq.*`） | 环境变量 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `token_url` | `BUB_QQ_TOKEN_URL` | `https://bots.qq.com/app/getAppAccessToken` | 访问令牌接口 |
+| `openapi_base_url` | `BUB_QQ_OPENAPI_BASE_URL` | `https://api.sgroup.qq.com` | OpenAPI 基址 |
+| `timeout_seconds` | `BUB_QQ_TIMEOUT_SECONDS` | `30` | 令牌与 OpenAPI 的 HTTP 超时 |
+| `token_refresh_skew_seconds` | `BUB_QQ_TOKEN_REFRESH_SKEW_SECONDS` | `60` | 到期前多少秒刷新令牌 |
+| `webhook_host` | `BUB_QQ_WEBHOOK_HOST` | `127.0.0.1` | 内嵌 webhook 监听地址 |
+| `webhook_port` | `BUB_QQ_WEBHOOK_PORT` | `8080` | 内嵌 webhook 端口（QQ 允许 `80` / `443` / `8080` / `8443`） |
+| `webhook_path` | `BUB_QQ_WEBHOOK_PATH` | `/qq/webhook` | webhook 路径 |
+| `webhook_callback_timeout_seconds` | `BUB_QQ_WEBHOOK_CALLBACK_TIMEOUT_SECONDS` | `15` | 预留给后续回调控制 |
+| `verify_signature` | `BUB_QQ_VERIFY_SIGNATURE` | `true` | 是否校验 webhook 签名 |
+| `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | 近期入站 `msg_id` 去重缓存大小 |
+| `websocket_intents` | `BUB_QQ_WEBSOCKET_INTENTS` | `1 << 25` | WebSocket identify intents（`GROUP_AND_C2C_EVENT`） |
+| `websocket_use_shard_gateway` | `BUB_QQ_WEBSOCKET_USE_SHARD_GATEWAY` | `false` | 是否按 `/gateway/bot` 建议分片数连接 |
+| `websocket_reconnect_delay_seconds` | `BUB_QQ_WEBSOCKET_RECONNECT_DELAY_SECONDS` | `5` | WebSocket 断线后重连延迟 |
+
+示例：
+
+```yaml
+qq:
+  appid: your_app_id
+  secret: your_secret
+  receive_mode: websocket
+```
+
+```bash
+export BUB_QQ_APPID=your_app_id
+export BUB_QQ_SECRET=your_secret
+export BUB_QQ_RECEIVE_MODE=websocket
+```
+
+## 运行
+
+QQ 是 channel 监听面。插件安装并配置完成后启动 gateway：
+
+```bash
+bub gateway
+```
+
+webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/path），并在 QQ 机器人后台登记回调。websocket 模式则需确保后台**没有**被成功配置的 webhook 独占。
+
+`bub chat` 不能替代 QQ 通道收发；QQ 场景请使用 `bub gateway`。
+
+## 会话与消息映射
+
+| 概念 | 格式 / 行为 |
+| --- | --- |
+| Session ID（C2C） | `qq:c2c:<user_openid>` |
+| Chat ID（C2C） | `c2c:<user_openid>` |
+| 入站事件 | `C2C_MESSAGE_CREATE` |
+| 命令消息 | 以 `,` 开头的入站文本会转成 Bub `kind=command` |
+| 出站 | 文本（`msg_type = 0`），**仅被动回复**（`msg_id` + 插件内部管理的 `msg_seq`） |
+| 被动窗口 | 最近一条入站时间超过 60 分钟后，回复会被跳过 |
+| Debounce | `needs_debounce = true` |
+
+有意不使用主动推送：官方文档写明 C2C 主动推送已于 2025-04-21 停止提供。
+
+## 载荷形状
+
+非命令入站消息会编码为 JSON 字符串，常见字段包括：
+
+- `message`
+- `message_id`
+- `type`（`text` 或 `attachment`）
+- `sender_id`（QQ `user_openid`）
+- `date`
+- `attachments`（如有）
+
+普通回复应直接返回最终文本，由 Bub outbound 路由调用 `QQChannel.send`。日常 C2C 回复不要调用 `qq_send.py`，也不要自行构造 `msg_seq`。
+
+## 状态
+
+### 当前支持
+
+- 通过 `qq:` YAML、`BUB_QQ_*` 以及 `bub onboard` 加载配置
+- 从 `https://bots.qq.com/app/getAppAccessToken` 获取访问令牌，并按 60 秒窗口缓存刷新
+- 基于 `aiohttp` 的 OpenAPI 客户端（`Authorization: QQBot {ACCESS_TOKEN}`）
+- 内嵌 webhook 接收、回调验证（`op = 13`）、ed25519 签名流程
+- webhook 请求验签（`X-Signature-Ed25519`、`X-Signature-Timestamp`）
+- WebSocket 接收路径（重连 / resume，可选分片）
+- C2C 入站适配、`msg_id` 去重、60 分钟被动文本回复
+- 同一 `session_id + msg_id + msg_seq` 的内存发送幂等
+- OpenAPI 错误暴露（HTTP 状态、平台业务码、`X-Tps-trace-ID`）及错误目录元数据
+- 覆盖配置、鉴权、签名、channel、webhook、websocket、gateway、插件 onboarding、C2C 等的自动化测试
+
+### 尚未支持
+
+- QQ 群 / 频道 / 更广的私信发送 API
+- 除验证与基础 `{"op":12}` 确认外的更广 webhook 事件
+- 群聊及其他非 C2C 事件类型
+- 启动后进程内动态分片再平衡
+
+## 已确认的接口约定
+
+依据 QQ 机器人官方文档（鉴权与事件订阅）：
+
+**鉴权 / OpenAPI**
+
+- 令牌：`POST https://bots.qq.com/app/getAppAccessToken`，请求体 `{ appId, clientSecret }`
+- 令牌最长约 `7200` 秒；到期前 `60` 秒内再次请求会返回新令牌，旧令牌在重叠期内仍有效
+- OpenAPI 基址：`https://api.sgroup.qq.com`
+- 请求头：`Authorization: QQBot {ACCESS_TOKEN}`；追踪头 `X-Tps-trace-ID`
+
+**事件 / 传输**
+
+- 生产环境 webhook 须 HTTPS；端口 `80`、`443`、`8080`、`8443`
+- 成功配置有效 HTTPS 回调后，webhook 与 WebSocket 互斥
+- 验证请求 `op = 13`；响应须含 `plain_token`，以及对 `event_ts + plain_token` 的 ed25519 签名
+- 普通 webhook 验签材料为 `timestamp + raw_body`
+- 事件载荷形状：`{ id, op, d, s, t }`
+- `C2C_MESSAGE_CREATE` 所属 intent：`GROUP_AND_C2C_EVENT`（`1 << 25`）
+- 当前使用的 `C2C_MESSAGE_CREATE.d` 字段：`id`、`author.user_openid`、`content`、`timestamp`、`attachments`
+- WebSocket 关闭码 `4914` / `4915` 视为致命；`4006`–`4009`、`4900`–`4913` 等视为可重连
+
+## 官方文档
+
+- [QQ 机器人开发文档](https://bot.q.qq.com/wiki/develop/api-v2/)
+- [Bub 文档](https://bub.build/zh-cn/docs/)
+- Bub 插件安装：`bub install`（见 [安装说明](https://bub.build/zh-cn/docs/getting-started/install/)）
+
+创建应用、凭据、事件订阅与回调配置（`APPID`、`SECRET`、回调 URL、intents 等）请以 QQ 官方文档为准。
+
+## 开发
+
+```bash
+uv run --package bub-qq pytest -q
+```
+
+测试使用 mock，不需要连接真实 QQ 网络。
+
+## 许可证
+
+与 [bub-contrib](https://github.com/bubbuild/bub-contrib) 仓库相同。
