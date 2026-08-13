@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from loguru import logger
 
-from .openapi_errors import QQOpenAPIError
+from ..protocol.errors import QQOpenAPIError
 
 
 def is_duplicate_send_error(exc: QQOpenAPIError) -> bool:

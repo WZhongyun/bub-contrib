@@ -11,15 +11,15 @@ from bub.channels.message import ChannelMessage
 from bub.channels.contracts import MessageHandler
 from loguru import logger
 
-from .auth import QQTokenProvider
-from .c2c import QQC2CDeduper
-from .c2c import QQC2CInboundService
-from .c2c import QQC2CSendService
-from .c2c import QQC2CSessionState
 from .config import QQConfig
-from .openapi import QQOpenAPI
-from .webhook import QQWebhookServer
-from .websocket import QQWebSocketClient
+from .gateway.webhook import QQWebhookServer
+from .gateway.websocket import QQWebSocketClient
+from .inbound.c2c import QQC2CDeduper
+from .inbound.c2c import QQC2CInboundService
+from .inbound.c2c import QQC2CSessionState
+from .outbound.c2c import QQC2CSendService
+from .protocol.auth import QQTokenProvider
+from .protocol.openapi import QQOpenAPI
 
 
 class QQChannel(Channel):

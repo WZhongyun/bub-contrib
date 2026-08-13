@@ -6,10 +6,10 @@ from collections.abc import Callable
 from typing import Any
 from typing import Protocol
 
-from bub_qq.auth import QQTokenProvider
 from bub_qq.config import QQConfig
-from bub_qq.openapi import QQOpenAPI
-from bub_qq.openapi_errors import lookup_known_error
+from bub_qq.protocol.auth import QQTokenProvider
+from bub_qq.protocol.errors import lookup_known_error
+from bub_qq.protocol.openapi import QQOpenAPI
 
 
 class Clock:

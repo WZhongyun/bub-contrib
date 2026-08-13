@@ -6,11 +6,11 @@ from bub import configure
 from bub.channels.message import ChannelMessage
 
 from bub_qq.channel import QQChannel
-from bub_qq.c2c import build_c2c_channel_message
-from bub_qq.c2c import QQC2CSendService
-from bub_qq.models import QQC2CMessage
-from bub_qq.openapi_errors import QQKnownOpenAPIError
-from bub_qq.openapi_errors import QQOpenAPIError
+from bub_qq.inbound.c2c import build_c2c_channel_message
+from bub_qq.outbound.c2c import QQC2CSendService
+from bub_qq.protocol.errors import QQKnownOpenAPIError
+from bub_qq.protocol.errors import QQOpenAPIError
+from bub_qq.protocol.models import QQC2CMessage
 
 
 class OpenAPIStub:

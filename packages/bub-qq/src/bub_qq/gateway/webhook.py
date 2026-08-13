@@ -10,9 +10,9 @@ from typing import Any
 
 from loguru import logger
 
-from .config import QQConfig
-from .signature import sign_validation_payload
-from .signature import verify_request_signature
+from ..config import QQConfig
+from ..protocol.signature import sign_validation_payload
+from ..protocol.signature import verify_request_signature
 
 WebhookCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 

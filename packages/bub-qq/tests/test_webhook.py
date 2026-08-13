@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from bub_qq.config import QQConfig
-from bub_qq.webhook import QQWebhookServer
+from bub_qq.gateway.webhook import QQWebhookServer
 
 
 def test_schedule_payload_runs_callback_on_loop() -> None:

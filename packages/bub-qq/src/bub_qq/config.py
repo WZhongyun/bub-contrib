@@ -22,8 +22,8 @@ class QQConfig(bub.Settings):
     timeout_seconds: float = 30.0
     token_refresh_skew_seconds: int = 60
     receive_mode: str = Field(
-        ...,
-        description="QQ inbound transport mode. Must be set to 'webhook' or 'websocket'.",
+        default="",
+        description="QQ inbound transport mode. Must be set to 'webhook' or 'websocket' before gateway start.",
     )
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 8080

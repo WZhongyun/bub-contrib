@@ -4,12 +4,12 @@ import asyncio
 
 from bub.channels.message import ChannelMessage
 
-from bub_qq.c2c import QQC2CDeduper
-from bub_qq.c2c import QQC2CInboundService
-from bub_qq.c2c import QQC2CSendService
-from bub_qq.c2c import QQC2CSessionState
-from bub_qq.openapi_errors import QQKnownOpenAPIError
-from bub_qq.openapi_errors import QQOpenAPIError
+from bub_qq.inbound.c2c import QQC2CDeduper
+from bub_qq.inbound.c2c import QQC2CInboundService
+from bub_qq.inbound.c2c import QQC2CSessionState
+from bub_qq.outbound.c2c import QQC2CSendService
+from bub_qq.protocol.errors import QQKnownOpenAPIError
+from bub_qq.protocol.errors import QQOpenAPIError
 
 
 class OpenAPIStub:

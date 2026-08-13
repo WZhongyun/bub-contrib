@@ -14,13 +14,12 @@ def test_inbound_dedupe_size_must_be_positive() -> None:
         raise AssertionError("expected inbound_dedupe_size=0 to be rejected")
 
 
-def test_receive_mode_is_required() -> None:
-    try:
-        QQConfig()
-    except ValidationError as exc:
-        assert "receive_mode" in str(exc)
-    else:
-        raise AssertionError("expected missing receive_mode to be rejected")
+def test_unconfigured_qq_section_is_valid() -> None:
+    config = QQConfig()
+
+    assert config.appid == ""
+    assert config.secret == ""
+    assert config.receive_mode == ""
 
 
 def test_webhook_port_defaults_to_official_allowed_port() -> None:

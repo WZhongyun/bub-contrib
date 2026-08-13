@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bub_qq.models import QQC2CMessage
+from bub_qq.protocol.models import QQC2CMessage
 
 
 def test_c2c_message_parses_minimal_payload() -> None:

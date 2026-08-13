@@ -6,11 +6,11 @@ from typing import Protocol
 
 import aiohttp
 
+from ..config import QQConfig
 from .auth import QQTokenProvider
-from .config import QQConfig
-from .openapi_errors import build_openapi_error
-from .openapi_errors import QQOpenAPIError
-from .openapi_errors import trace_id_from_response
+from .errors import QQOpenAPIError
+from .errors import build_openapi_error
+from .errors import trace_id_from_response
 
 
 class ResponseLike(Protocol):
