@@ -193,6 +193,7 @@ class ACPStreamState:
     pending_tool_indices: list[int] = field(default_factory=list)
     pending_terminal_calls: list[tuple[str | None, int]] = field(default_factory=list)
     terminal_tool_indices: set[int] = field(default_factory=set)
+    context_compaction_indices: set[int] = field(default_factory=set)
     next_tool_index: int = 0
     sent_text: bool = False
     reported_usage: tuple[int, int] | None = None
@@ -325,19 +326,22 @@ class ACPStreamRouter:
         tool_id = _tool_call_id(index, call)
         state.tool_ids[index] = tool_id
         tool_name = _tool_name(call)
-        title = _tool_title(call)
+        is_context_compaction = tool_name == "tape.handoff"
+        title = "Context compacting" if is_context_compaction else _tool_title(call)
         if tool_name == "bash":
             state.pending_terminal_calls.append((_tool_command(call), index))
-        await self._client.session_update(
-            session_id,
-            start_tool_call(
-                tool_id,
-                title,
-                kind=_tool_kind(tool_name),
-                status="in_progress",
-                raw_input=_tool_raw_input(call),
-            ),
+        if is_context_compaction:
+            state.context_compaction_indices.add(index)
+        update = start_tool_call(
+            tool_id,
+            title,
+            kind="other" if is_context_compaction else _tool_kind(tool_name),
+            status="in_progress",
+            raw_input=_tool_raw_input(call),
         )
+        if is_context_compaction:
+            update.field_meta = {"contextCompaction": True}
+        await self._client.session_update(session_id, update)
         return index
 
     async def attach_terminal(
@@ -392,17 +396,19 @@ class ACPStreamRouter:
         tool_id = state.tool_ids.get(index, f"tool-{index}")
         result = data.get("result")
         content = None
-        if index not in state.terminal_tool_indices:
+        is_context_compaction = index in state.context_compaction_indices
+        if index not in state.terminal_tool_indices and not is_context_compaction:
             content = [tool_content(text_block(_stringify(result)))]
-        await self._client.session_update(
-            session_id,
-            update_tool_call(
-                tool_id,
-                status="completed",
-                raw_output=result,
-                content=content,
-            ),
+        update = update_tool_call(
+            tool_id,
+            title="Context compacted" if is_context_compaction else None,
+            status="completed",
+            raw_output=result,
+            content=content,
         )
+        if is_context_compaction:
+            update.field_meta = {"contextCompaction": True}
+        await self._client.session_update(session_id, update)
 
 
 class BubACPAgent:

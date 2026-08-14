@@ -683,6 +683,50 @@ async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tape_handoff_is_reported_as_context_compaction() -> None:
+    client = FakeClient()
+    router = ACPStreamRouter(client)
+
+    async def stream():
+        yield StreamEvent(
+            "tool_call",
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-handoff",
+                        "type": "function",
+                        "function": {
+                            "name": "tape.handoff",
+                            "arguments": '{"name":"phase-1","summary":"done"}',
+                        },
+                    }
+                ]
+            },
+        )
+        yield StreamEvent(
+            "tool_result", {"tool_results": ["anchor added: phase-1"]}
+        )
+
+    async for _ in router.wrap_stream({"chat_id": "session-1"}, stream()):
+        pass
+
+    start = client.updates[0][1]
+    completed = client.updates[1][1]
+    assert start.session_update == "tool_call"
+    assert start.tool_call_id == "call-handoff"
+    assert start.title == "Context compacting"
+    assert start.kind == "other"
+    assert start.status == "in_progress"
+    assert start.field_meta == {"contextCompaction": True}
+    assert completed.session_update == "tool_call_update"
+    assert completed.tool_call_id == "call-handoff"
+    assert completed.title == "Context compacted"
+    assert completed.status == "completed"
+    assert completed.content is None
+    assert completed.field_meta == {"contextCompaction": True}
+
+
+@pytest.mark.asyncio
 async def test_stream_router_isolates_concurrent_session_state() -> None:
     client = FakeClient()
     router = ACPStreamRouter(client)
