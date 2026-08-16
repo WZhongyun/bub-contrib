@@ -532,8 +532,8 @@ async def test_prompt_passes_session_config_to_bub_context(tmp_path: Path) -> No
         session_id=created.session_id,
     )
 
-    assert framework.messages[0].context["model"] == "anthropic:claude-sonnet-4-5"
-    assert framework.messages[0].context["reasoning_effort"] == "high"
+    assert framework.messages[0].context["_runtime_model"] == "anthropic:claude-sonnet-4-5"
+    assert framework.messages[0].context["_runtime_reasoning_effort"] == "high"
     assert framework.messages[0].context["_runtime_workspace"] == str(tmp_path)
     assert framework.messages[0].context["chat_id"] == created.session_id
     assert "acp_session_id" not in framework.messages[0].context

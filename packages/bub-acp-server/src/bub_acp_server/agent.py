@@ -739,9 +739,9 @@ class BubACPAgent:
         content, media = _prompt_to_bub_content(prompt)
         context: dict[str, str] = {}
         if model := session.runtime.get("model"):
-            context["model"] = model
+            context["_runtime_model"] = model
         if reasoning_effort := session.runtime.get(REASONING_EFFORT_CONFIG_ID):
-            context[REASONING_EFFORT_CONFIG_ID] = reasoning_effort
+            context["_runtime_reasoning_effort"] = reasoning_effort
         context["_runtime_workspace"] = str(session.cwd)
         return ChannelMessage(
             session_id=_bub_session_id(self.settings.channel_name, session.session_id),
