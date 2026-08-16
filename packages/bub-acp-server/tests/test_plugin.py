@@ -598,11 +598,9 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
     response = await agent.prompt(
         [TextContentBlock(type="text", text="say hello")],
         session_id=session.session_id,
-        message_id="user-message-1",
     )
 
     assert response.stop_reason == "end_turn"
-    assert response.user_message_id == "user-message-1"
     assert framework.stream_output_values == [True]
     assert framework.messages[0].content == "say hello"
     assert framework.messages[0].channel == "acp-server"

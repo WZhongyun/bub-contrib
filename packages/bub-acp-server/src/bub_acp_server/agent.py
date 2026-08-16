@@ -596,7 +596,6 @@ class BubACPAgent:
         self,
         prompt: list[ACPPromptBlock],
         session_id: str,
-        message_id: str | None = None,
         **kwargs: Any,
     ) -> PromptResponse:
         del kwargs
@@ -605,7 +604,7 @@ class BubACPAgent:
         session.touch()
         self._save_sessions()
         run = self._register_prompt_run(session_id)
-        return await self._execute_prompt(prompt, session, client, run, message_id)
+        return await self._execute_prompt(prompt, session, client, run)
 
     async def ext_method(
         self, method: str, params: dict[str, Any]
@@ -688,7 +687,7 @@ class BubACPAgent:
         client = self._require_client()
         run = self._register_prompt_run(session.session_id, background=True)
         task = asyncio.create_task(
-            self._execute_prompt(prompt, session, client, run, message_id=None),
+            self._execute_prompt(prompt, session, client, run),
             name=f"acp-steering-{session.session_id}",
         )
         run.task = task
@@ -720,7 +719,6 @@ class BubACPAgent:
         session: ACPSession,
         client: Client,
         run: ACPPromptRun,
-        message_id: str | None,
     ) -> PromptResponse:
         try:
             inbound = self._build_inbound(prompt, session)
@@ -729,7 +727,7 @@ class BubACPAgent:
             await self._process_inbound_with_streaming(
                 inbound, session, client, run=run
             )
-            return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
+            return PromptResponse(stop_reason="end_turn")
         finally:
             self._complete_prompt_run(run)
 
