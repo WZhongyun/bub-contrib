@@ -14,9 +14,7 @@ from loguru import logger
 from .config import QQConfig
 from .gateway.webhook import QQWebhookServer
 from .gateway.websocket import QQWebSocketClient
-from .inbound.c2c import QQC2CDeduper
 from .inbound.c2c import QQC2CInboundService
-from .inbound.c2c import QQC2CSessionState
 from .inbound.group import GROUP_EVENTS
 from .inbound.group import QQGroupInboundService
 from .inbound.group import group_was_mentioned
@@ -29,6 +27,8 @@ from .outbound.group import QQGroupSendService
 from .protocol.auth import QQTokenProvider
 from .protocol.errors import QQOpenAPIError
 from .protocol.openapi import QQOpenAPI
+from .session import QQInboundDeduper
+from .session import QQSessionState
 
 
 class QQChannel(Channel):
@@ -45,12 +45,9 @@ class QQChannel(Channel):
         self._websocket = QQWebSocketClient(
             self._config, self._openapi, self._handle_transport_payload
         )
-        self._deduper = QQC2CDeduper(self._config.inbound_dedupe_size)
-        self._session_state = QQC2CSessionState(
-            latest_message_id_by_session={},
-            latest_sequence_by_session_and_msg_id={},
-            latest_timestamp_by_session={},
-            send_record_by_session_msg_id_and_seq={},
+        self._deduper = QQInboundDeduper(self._config.inbound_dedupe_size)
+        self._session_state = QQSessionState(
+            max_entries=self._config.session_state_size
         )
         self._c2c_inbound = QQC2CInboundService(
             channel_name=self.name,
@@ -67,17 +64,15 @@ class QQChannel(Channel):
             receive_mode=self._config.receive_mode,
             state=self._session_state,
             openapi=self._openapi,
+            passive_reply_window_seconds=self._config.passive_reply_window_seconds,
         )
         self._group_send = QQGroupSendService(
             channel_name=self.name,
             receive_mode=self._config.receive_mode,
             state=self._session_state,
             openapi=self._openapi,
+            passive_reply_window_seconds=self._config.passive_reply_window_seconds,
         )
-
-    @property
-    def _c2c_state(self) -> QQC2CSessionState:
-        return self._session_state
 
     @property
     def needs_debounce(self) -> bool:

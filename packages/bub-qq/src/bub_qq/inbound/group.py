@@ -9,10 +9,11 @@ from loguru import logger
 
 from ..protocol.models import QQGroupMessage
 from ..protocol.models import QQMention
-from .c2c import QQC2CDeduper
-from .c2c import QQC2CSessionState
-from .c2c import exclude_none
-from .c2c import remember_c2c_session
+from ..session import QQInboundDeduper
+from ..session import QQSessionState
+from ..session import remember_session
+from .common import attachment_payloads
+from .common import exclude_none
 
 GROUP_AT_EVENT = "GROUP_AT_MESSAGE_CREATE"
 GROUP_MESSAGE_EVENT = "GROUP_MESSAGE_CREATE"
@@ -26,8 +27,8 @@ class QQGroupInboundService:
         self,
         *,
         channel_name: str,
-        deduper: QQC2CDeduper,
-        state: QQC2CSessionState,
+        deduper: QQInboundDeduper,
+        state: QQSessionState,
     ) -> None:
         self._channel_name = channel_name
         self._deduper = deduper
@@ -47,12 +48,11 @@ class QQGroupInboundService:
             return None
 
         channel_message = build_group_channel_message(self._channel_name, message)
-        remember_c2c_session(
+        remember_session(
             self._state,
             session_id=channel_message.session_id,
             message_id=message.message_id,
             timestamp=message.timestamp,
-            sequence=message.sequence,
         )
         return message, channel_message
 
@@ -86,20 +86,7 @@ def build_group_channel_message(
         "chat_type": "group",
         "was_mentioned": was_mentioned,
         "date": message.timestamp,
-        "attachments": [
-            {
-                "content_type": attachment.content_type,
-                "filename": attachment.filename,
-                "height": attachment.height,
-                "width": attachment.width,
-                "size": attachment.size,
-                "url": attachment.url,
-                "voice_wav_url": attachment.voice_wav_url,
-                "asr_refer_text": attachment.asr_refer_text,
-            }
-            for attachment in message.attachments
-        ]
-        or None,
+        "attachments": attachment_payloads(message.attachments),
     }
     return ChannelMessage(
         session_id=session_id,

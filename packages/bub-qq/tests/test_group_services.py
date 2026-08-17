@@ -5,8 +5,6 @@ import json
 
 from bub.channels.message import ChannelMessage
 
-from bub_qq.inbound.c2c import QQC2CDeduper
-from bub_qq.inbound.c2c import QQC2CSessionState
 from bub_qq.inbound.group import QQGroupInboundService
 from bub_qq.inbound.group import build_group_channel_message
 from bub_qq.inbound.group import strip_mention_text
@@ -15,6 +13,8 @@ from bub_qq.inbound.interaction import parse_interaction_event
 from bub_qq.outbound.group import QQGroupSendService
 from bub_qq.protocol.models import QQGroupMessage
 from bub_qq.protocol.models import QQMention
+from bub_qq.session import QQInboundDeduper
+from bub_qq.session import QQSessionState
 
 
 class GroupOpenAPIStub:
@@ -59,13 +59,8 @@ class GroupOpenAPIStub:
         return {"id": "group-reply-1"}
 
 
-def _state() -> QQC2CSessionState:
-    return QQC2CSessionState(
-        latest_message_id_by_session={},
-        latest_sequence_by_session_and_msg_id={},
-        latest_timestamp_by_session={},
-        send_record_by_session_msg_id_and_seq={},
-    )
+def _state() -> QQSessionState:
+    return QQSessionState()
 
 
 def _payload(
@@ -106,7 +101,7 @@ def test_group_inbound_parses_at_message_as_active() -> None:
     state = _state()
     service = QQGroupInboundService(
         channel_name="qq",
-        deduper=QQC2CDeduper(16),
+        deduper=QQInboundDeduper(16),
         state=state,
     )
 
@@ -132,7 +127,7 @@ def test_group_inbound_unmentioned_message_is_still_active() -> None:
     state = _state()
     service = QQGroupInboundService(
         channel_name="qq",
-        deduper=QQC2CDeduper(16),
+        deduper=QQInboundDeduper(16),
         state=state,
     )
 
@@ -155,7 +150,7 @@ def test_group_inbound_unmentioned_message_is_still_active() -> None:
 def test_group_inbound_dedupes_repeated_messages() -> None:
     service = QQGroupInboundService(
         channel_name="qq",
-        deduper=QQC2CDeduper(16),
+        deduper=QQInboundDeduper(16),
         state=_state(),
     )
 

@@ -4,12 +4,12 @@ import asyncio
 
 from bub.channels.message import ChannelMessage
 
-from bub_qq.inbound.c2c import QQC2CDeduper
 from bub_qq.inbound.c2c import QQC2CInboundService
-from bub_qq.inbound.c2c import QQC2CSessionState
 from bub_qq.outbound.c2c import QQC2CSendService
 from bub_qq.protocol.errors import QQKnownOpenAPIError
 from bub_qq.protocol.errors import QQOpenAPIError
+from bub_qq.session import QQInboundDeduper
+from bub_qq.session import QQSessionState
 
 
 class OpenAPIStub:
@@ -84,13 +84,8 @@ class FailingOpenAPIStub:
         raise self.error
 
 
-def _state() -> QQC2CSessionState:
-    return QQC2CSessionState(
-        latest_message_id_by_session={},
-        latest_sequence_by_session_and_msg_id={},
-        latest_timestamp_by_session={},
-        send_record_by_session_msg_id_and_seq={},
-    )
+def _state() -> QQSessionState:
+    return QQSessionState()
 
 
 def _payload(message_id: str = "message-1") -> dict[str, object]:
@@ -111,7 +106,7 @@ def _payload(message_id: str = "message-1") -> dict[str, object]:
 def test_c2c_inbound_service_parses_and_remembers_session() -> None:
     state = _state()
     service = QQC2CInboundService(
-        channel_name="qq", deduper=QQC2CDeduper(16), state=state
+        channel_name="qq", deduper=QQInboundDeduper(16), state=state
     )
 
     parsed = service.parse_inbound(_payload())
@@ -127,7 +122,7 @@ def test_c2c_inbound_service_parses_and_remembers_session() -> None:
 def test_c2c_inbound_service_dedupes_repeated_messages() -> None:
     state = _state()
     service = QQC2CInboundService(
-        channel_name="qq", deduper=QQC2CDeduper(16), state=state
+        channel_name="qq", deduper=QQInboundDeduper(16), state=state
     )
 
     assert service.parse_inbound(_payload("message-1")) is not None
@@ -177,7 +172,7 @@ def test_c2c_send_service_starts_msg_seq_at_one_after_inbound_transport_sequence
     async def _run() -> None:
         state = _state()
         inbound = QQC2CInboundService(
-            channel_name="qq", deduper=QQC2CDeduper(16), state=state
+            channel_name="qq", deduper=QQInboundDeduper(16), state=state
         )
         parsed = inbound.parse_inbound(_payload())
 
@@ -224,7 +219,7 @@ def test_c2c_send_service_resets_msg_seq_for_new_inbound_msg_id() -> None:
         state = _state()
         openapi = OpenAPIStub()
         inbound = QQC2CInboundService(
-            channel_name="qq", deduper=QQC2CDeduper(16), state=state
+            channel_name="qq", deduper=QQInboundDeduper(16), state=state
         )
         service = QQC2CSendService(
             channel_name="qq",
@@ -495,6 +490,44 @@ def test_c2c_send_service_treats_remote_duplicate_as_already_sent() -> None:
 
         assert first == {"status": "already_sent"}
         assert second == {"status": "already_sent"}
-        assert openapi.calls == 2
+        # The remote duplicate is recorded locally, so the retry never hits QQ.
+        assert openapi.calls == 1
+
+    asyncio.run(_run())
+
+
+def test_c2c_send_service_dedupes_identical_content_locally() -> None:
+    async def _run() -> None:
+        state = _state()
+        state.latest_message_id_by_session["qq:c2c:user-openid"] = "message-1"
+        state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
+            "2099-01-01T00:00:00+00:00"
+        )
+        openapi = OpenAPIStub()
+        service = QQC2CSendService(
+            channel_name="qq",
+            receive_mode="webhook",
+            state=state,
+            openapi=openapi,
+        )
+        message = ChannelMessage(
+            session_id="qq:c2c:user-openid",
+            chat_id="c2c:user-openid",
+            content="hello",
+            channel="qq",
+        )
+
+        first = await service.send(message)
+        second = await service.send(message)
+
+        assert first == {"id": "reply-1"}
+        assert second == {"id": "reply-1", "status": "already_sent"}
+        assert len(openapi.calls) == 1
+        assert (
+            state.latest_sequence_by_session_and_msg_id[
+                ("qq:c2c:user-openid", "message-1")
+            ]
+            == 1
+        )
 
     asyncio.run(_run())

@@ -138,7 +138,7 @@ def _install_send_service(channel: QQChannel, openapi: object) -> None:
     channel._c2c_send = QQC2CSendService(  # type: ignore[assignment]
         channel_name=channel.name,
         receive_mode=channel._config.receive_mode,
-        state=channel._c2c_state,
+        state=channel._session_state,
         openapi=openapi,  # type: ignore[arg-type]
     )
 
@@ -150,10 +150,10 @@ def test_channel_send_uses_latest_c2c_message_context() -> None:
         channel = QQChannel(lambda message: None)
         openapi = OpenAPIStub()
         _install_send_service(channel, openapi)
-        channel._c2c_state.latest_message_id_by_session["qq:c2c:user-openid"] = (
+        channel._session_state.latest_message_id_by_session["qq:c2c:user-openid"] = (
             "message-1"
         )
-        channel._c2c_state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
+        channel._session_state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
             "2099-01-01T00:00:00+00:00"
         )
 
@@ -197,10 +197,10 @@ def test_channel_send_handles_reply_expired_error() -> None:
             )
         )
         _install_send_service(channel, openapi)
-        channel._c2c_state.latest_message_id_by_session["qq:c2c:user-openid"] = (
+        channel._session_state.latest_message_id_by_session["qq:c2c:user-openid"] = (
             "message-1"
         )
-        channel._c2c_state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
+        channel._session_state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
             "2099-01-01T00:00:00+00:00"
         )
 
@@ -237,10 +237,10 @@ def test_channel_send_handles_rate_limit_error() -> None:
             )
         )
         _install_send_service(channel, openapi)
-        channel._c2c_state.latest_message_id_by_session["qq:c2c:user-openid"] = (
+        channel._session_state.latest_message_id_by_session["qq:c2c:user-openid"] = (
             "message-1"
         )
-        channel._c2c_state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
+        channel._session_state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
             "2099-01-01T00:00:00+00:00"
         )
 
@@ -330,13 +330,13 @@ def test_channel_send_routes_group_messages() -> None:
         channel._group_send = QQGroupSendService(  # type: ignore[assignment]
             channel_name=channel.name,
             receive_mode=channel._config.receive_mode,
-            state=channel._c2c_state,
+            state=channel._session_state,
             openapi=openapi,
         )
-        channel._c2c_state.latest_message_id_by_session["qq:group:group-openid"] = (
+        channel._session_state.latest_message_id_by_session["qq:group:group-openid"] = (
             "group-message-1"
         )
-        channel._c2c_state.latest_timestamp_by_session["qq:group:group-openid"] = (
+        channel._session_state.latest_timestamp_by_session["qq:group:group-openid"] = (
             "2099-01-01T00:00:00+00:00"
         )
 
