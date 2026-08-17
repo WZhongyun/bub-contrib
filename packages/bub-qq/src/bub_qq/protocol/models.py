@@ -32,6 +32,87 @@ class QQAttachment:
 
 
 @dataclass(frozen=True)
+class QQMention:
+    """A single @mention entry in a QQ group event."""
+
+    member_openid: str | None
+    nickname: str | None
+    is_you: bool
+    scope: str | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> QQMention:
+        return cls(
+            member_openid=_optional_str(
+                payload.get("member_openid")
+                or payload.get("id")
+                or payload.get("user_openid")
+            ),
+            nickname=_optional_str(payload.get("nickname") or payload.get("username")),
+            is_you=bool(payload.get("is_you")),
+            scope=_optional_str(payload.get("scope")),
+        )
+
+
+@dataclass(frozen=True)
+class QQGroupMessage:
+    """Normalized QQ group message event payload."""
+
+    message_id: str
+    group_openid: str
+    member_openid: str
+    sender_name: str | None
+    content: str
+    timestamp: str | None
+    attachments: tuple[QQAttachment, ...]
+    mentions: tuple[QQMention, ...]
+    event_id: str | None
+    sequence: int | None
+    event_type: str | None
+
+    @classmethod
+    def from_event(cls, payload: dict[str, Any]) -> QQGroupMessage:
+        data = payload.get("d")
+        if not isinstance(data, dict):
+            raise ValueError("qq event payload.d must be an object")
+
+        author = data.get("author")
+        if not isinstance(author, dict):
+            raise ValueError("qq group event author must be an object")
+
+        mentions_raw = data.get("mentions") or []
+        if not isinstance(mentions_raw, list):
+            raise ValueError("qq group event mentions must be an array")
+        attachments_raw = data.get("attachments") or []
+        if not isinstance(attachments_raw, list):
+            raise ValueError("qq group event attachments must be an array")
+
+        return cls(
+            message_id=_required_str(data.get("id"), "id"),
+            group_openid=_required_str(data.get("group_openid"), "group_openid"),
+            member_openid=_required_str(
+                author.get("member_openid"), "author.member_openid"
+            ),
+            sender_name=_optional_str(author.get("username") or author.get("nickname")),
+            content=str(data.get("content") or ""),
+            timestamp=_optional_str(data.get("timestamp")),
+            attachments=tuple(
+                QQAttachment.from_payload(item)
+                for item in attachments_raw
+                if isinstance(item, dict)
+            ),
+            mentions=tuple(
+                QQMention.from_payload(item)
+                for item in mentions_raw
+                if isinstance(item, dict)
+            ),
+            event_id=_optional_str(payload.get("id")),
+            sequence=_optional_int(payload.get("s")),
+            event_type=_optional_str(payload.get("t")),
+        )
+
+
+@dataclass(frozen=True)
 class QQC2CMessage:
     """Normalized QQ C2C message event payload."""
 

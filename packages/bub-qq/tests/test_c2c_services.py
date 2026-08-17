@@ -34,6 +34,25 @@ class OpenAPIStub:
         )
         return {"id": "reply-1"}
 
+    async def post_c2c_markdown_message(
+        self,
+        *,
+        openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "openid": openid,
+                "content": content,
+                "msg_id": msg_id,
+                "msg_seq": msg_seq,
+                "msg_type": 2,
+            }
+        )
+        return {"id": "reply-1"}
+
 
 class FailingOpenAPIStub:
     def __init__(self, error: QQOpenAPIError) -> None:
@@ -41,6 +60,18 @@ class FailingOpenAPIStub:
         self.calls = 0
 
     async def post_c2c_text_message(
+        self,
+        *,
+        openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, object]:
+        del openid, content, msg_id, msg_seq
+        self.calls += 1
+        raise self.error
+
+    async def post_c2c_markdown_message(
         self,
         *,
         openid: str,

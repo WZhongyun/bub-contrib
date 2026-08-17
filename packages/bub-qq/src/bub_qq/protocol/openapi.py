@@ -162,14 +162,108 @@ class QQOpenAPI:
         msg_id: str,
         msg_seq: int,
     ) -> dict[str, Any]:
+        return await self._post_text_message(
+            path=f"/v2/users/{openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def post_c2c_markdown_message(
+        self,
+        *,
+        openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self._post_markdown_message(
+            path=f"/v2/users/{openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def post_group_text_message(
+        self,
+        *,
+        group_openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self._post_text_message(
+            path=f"/v2/groups/{group_openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def post_group_markdown_message(
+        self,
+        *,
+        group_openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self._post_markdown_message(
+            path=f"/v2/groups/{group_openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def _post_text_message(
+        self,
+        *,
+        path: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
         return await self.post(
-            f"/v2/users/{openid}/messages",
+            path,
             json_body={
                 "content": content,
                 "msg_type": 0,
                 "msg_id": msg_id,
                 "msg_seq": msg_seq,
             },
+        )
+
+    async def _post_markdown_message(
+        self,
+        *,
+        path: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self.post(
+            path,
+            json_body={
+                "msg_type": 2,
+                "markdown": {"content": content},
+                "msg_id": msg_id,
+                "msg_seq": msg_seq,
+            },
+        )
+
+    async def put_interaction(
+        self,
+        *,
+        interaction_id: str,
+        code: int = 0,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        json_body: dict[str, Any] = {"code": code}
+        if data:
+            json_body["data"] = data
+        return await self.request(
+            "PUT",
+            f"/interactions/{interaction_id}",
+            json_body=json_body,
         )
 
 
