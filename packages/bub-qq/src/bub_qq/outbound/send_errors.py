@@ -62,7 +62,7 @@ def log_send_error(
             content_hash="-",
         )
         return
-    if code == 304027:
+    if code in {304027, 40034005}:
         logger.warning(
             "qq.send failed session_id={} openid={} msg_id={} msg_seq={} reason=reply_expired trace_id={}",
             session_id,

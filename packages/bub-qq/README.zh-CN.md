@@ -6,14 +6,19 @@ English documentation: [README.md](./README.md)
 
 ## 功能概览
 
-- Bub 通道插件（入口点：`qq` → `bub_qq.plugin`）
-- 将单聊入站事件 `C2C_MESSAGE_CREATE`、群聊事件 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 适配为 Bub `ChannelMessage`
-- 通过 QQ OpenAPI 发送单聊 / 群聊文本回复（仅被动回复）
-- 接收模式切换：**webhook** 或 **websocket**（QQ 平台侧二者互斥）
-- 提供 `onboard_config`，`bub onboard` 可采集 `appid` / `secret` / `receive_mode`
-- 随包提供 skill 资源：`src/skills/qq`
+| 能力 | 说明 |
+| --- | --- |
+| 单聊（C2C）收发 | `C2C_MESSAGE_CREATE` 适配为 Bub `ChannelMessage`；被动文本 / markdown 回复 |
+| 群聊收发 | `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE`；支持全量消息模式，payload 携带 `was_mentioned` / `sender_role` |
+| 群主动消息 | 被动回复不可用时兜底主动发送（`active_messages`，需群管理员在 QQ 客户端授权） |
+| 引用与聊天记录 | 解析 `msg_elements`，将引用消息 / 合并转发内容以 `quoted_messages` 传给模型 |
+| 接收模式 | **webhook** 或 **websocket** 二选一（QQ 平台侧互斥）；含 ed25519 验签与断线重连 |
+| 安全防护 | 用户/群白名单、按角色门控的逗号命令、按场景工具策略、LLM 频控、审计日志（见「安全」） |
+| 平台状态持久化 | 主动消息授权（`*_MSG_RECEIVE` / `*_MSG_REJECT`）与群 claw_cfg 落盘，重启不丢 |
+| 可靠发送 | 入站/出站去重、`msg_seq` 管理、错误码目录；异步人工审核（304023/304024）按「待审核成功」处理 |
+| Onboarding | `bub onboard` 交互采集 `appid` / `secret` / `receive_mode`；随包提供 skill 资源（`src/skills/qq`） |
 
-当前支持 **单聊（C2C）** 和 **群聊** 文本收发。QQ 频道（Guild）尚未覆盖。
+插件入口点：`qq` → `bub_qq.plugin`。当前支持 **单聊（C2C）** 和 **群聊** 文本收发，QQ 频道（Guild）尚未覆盖。
 
 ## 前置条件
 
@@ -133,7 +138,7 @@ QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 
 | YAML 字段（`qq.*`） | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `token_url` | `BUB_QQ_TOKEN_URL` | `https://bots.qq.com/app/getAppAccessToken` | 访问令牌接口 |
-| `openapi_base_url` | `BUB_QQ_OPENAPI_BASE_URL` | `https://api.sgroup.qq.com` | OpenAPI 基址 |
+| `openapi_base_url` | `BUB_QQ_OPENAPI_BASE_URL` | `https://api.bot.qq.com` | OpenAPI 基址（官方统一请求地址；旧地址 `https://api.sgroup.qq.com` 可在此覆盖） |
 | `timeout_seconds` | `BUB_QQ_TIMEOUT_SECONDS` | `30` | 令牌与 OpenAPI 的 HTTP 超时 |
 | `token_refresh_skew_seconds` | `BUB_QQ_TOKEN_REFRESH_SKEW_SECONDS` | `60` | 到期前多少秒刷新令牌 |
 | `webhook_host` | `BUB_QQ_WEBHOOK_HOST` | `127.0.0.1` | 内嵌 webhook 监听地址 |
@@ -176,6 +181,8 @@ export BUB_QQ_RECEIVE_MODE=websocket
 ```
 
 群聊能听到哪些消息，由 QQ 客户端里群管理员的「允许机器人可获取的群聊消息范围」决定（全部消息 / @ 最近 10 条 / 仅 @）。插件对收到的每条群消息都会唤醒模型；未 @ 时 payload 里 `was_mentioned` 为 `false`，模型可选择不回复（空文本不会发出）。
+
+最新版手机 QQ 中的设置路径：**进入群聊 → 右上角「更多」 → 群机器人 → 管理**。群主或管理员可在此调整「机器人可获取的群聊消息范围」，以及是否「允许机器人主动发言」（配合 `active_messages` 使用）。
 
 ## 安全
 
@@ -247,7 +254,7 @@ C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21
 - C2C / 群聊入站适配、`msg_id` 去重、60 分钟被动文本或 markdown 回复
 - 群聊文本收发；消息范围由 QQ 客户端群管理员控制
 - 同一 `session_id + msg_id + msg_seq` 的内存发送幂等
-- OpenAPI 错误暴露（HTTP 状态、平台业务码、`X-Tps-trace-ID`）及错误目录元数据
+- OpenAPI 错误暴露（HTTP 状态、平台业务码 `code` / `err_code`、响应头或响应体中的 trace_id）及错误目录元数据
 - 多层安全防护：白名单、按角色门控的逗号命令、按场景的工具策略、LLM 频控与审计日志（见「安全」）
 - 群主动消息作为被动回复的兜底（`active_messages`），并通过 `*_MSG_RECEIVE` / `*_MSG_REJECT` 事件按群/用户持久化授权状态
 - claw_cfg 闭环：`INTERACTION_CREATE` 2002 变更按群持久化，2001 查询回显真实 `require_mention` 状态
@@ -270,8 +277,9 @@ C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21
 
 - 令牌：`POST https://bots.qq.com/app/getAppAccessToken`，请求体 `{ appId, clientSecret }`
 - 令牌最长约 `7200` 秒；到期前 `60` 秒内再次请求会返回新令牌，旧令牌在重叠期内仍有效
-- OpenAPI 基址：`https://api.sgroup.qq.com`
-- 请求头：`Authorization: QQBot {ACCESS_TOKEN}`；追踪头 `X-Tps-trace-ID`
+- OpenAPI 统一请求地址：`https://api.bot.qq.com`（旧地址 `https://api.sgroup.qq.com` 可通过 `openapi_base_url` 覆盖）
+- 请求头：`Authorization: QQBot {ACCESS_TOKEN}`
+- 失败响应体包含 `err_code`、`message`、`trace_id`（旧格式为 `code`，插件两者都识别）；trace_id 也可从响应头 `X-Tps-trace-ID` 获取
 
 **事件 / 传输**
 
