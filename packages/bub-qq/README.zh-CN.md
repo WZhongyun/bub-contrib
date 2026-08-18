@@ -7,13 +7,13 @@ English documentation: [README.md](./README.md)
 ## 功能概览
 
 - Bub 通道插件（入口点：`qq` → `bub_qq.plugin`）
-- 将单聊入站事件 `C2C_MESSAGE_CREATE` 适配为 Bub `ChannelMessage`
-- 通过 QQ OpenAPI 发送单聊文本回复（仅被动回复）
+- 将单聊入站事件 `C2C_MESSAGE_CREATE`、群聊事件 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 适配为 Bub `ChannelMessage`
+- 通过 QQ OpenAPI 发送单聊 / 群聊文本回复（仅被动回复）
 - 接收模式切换：**webhook** 或 **websocket**（QQ 平台侧二者互斥）
 - 提供 `onboard_config`，`bub onboard` 可采集 `appid` / `secret` / `receive_mode`
 - 随包提供 skill 资源：`src/skills/qq`
 
-当前重点是 **单聊（C2C）收发**。群聊 / 频道等能力尚未覆盖。
+当前支持 **单聊（C2C）** 和 **群聊** 文本收发。QQ 频道（Guild）尚未覆盖。
 
 ## 前置条件
 
@@ -161,6 +161,8 @@ export BUB_QQ_SECRET=your_secret
 export BUB_QQ_RECEIVE_MODE=websocket
 ```
 
+群聊能听到哪些消息，由 QQ 客户端里群管理员的「允许机器人可获取的群聊消息范围」决定（全部消息 / @ 最近 10 条 / 仅 @）。插件对收到的每条群消息都会唤醒模型；未 @ 时 payload 里 `was_mentioned` 为 `false`，模型可选择不回复（空文本不会发出）。
+
 ## 运行
 
 QQ 是 channel 监听面。插件安装并配置完成后启动 gateway：
@@ -179,9 +181,12 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 | --- | --- |
 | Session ID（C2C） | `qq:c2c:<user_openid>` |
 | Chat ID（C2C） | `c2c:<user_openid>` |
-| 入站事件 | `C2C_MESSAGE_CREATE` |
+| Session ID（群） | `qq:group:<group_openid>` |
+| Chat ID（群） | `group:<group_openid>` |
+| 入站事件 | `C2C_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` |
+| 群聊唤醒 | 收到的群消息一律 `is_active=true`；消息范围由 QQ 客户端群管理员设置 |
 | 命令消息 | 以 `,` 开头的入站文本会转成 Bub `kind=command` |
-| 出站 | 文本（`msg_type = 0`），**仅被动回复**（`msg_id` + 插件内部管理的 `msg_seq`） |
+| 出站 | 文本（`msg_type = 0`），或在回复看起来像 markdown 时发送 markdown（`msg_type = 2`）；**仅被动回复**（`msg_id` + 插件内部管理的 `msg_seq`） |
 | 被动窗口 | 最近一条入站时间超过 60 分钟后，回复会被跳过 |
 | Debounce | `needs_debounce = true` |
 
@@ -194,7 +199,8 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 - `message`
 - `message_id`
 - `type`（`text` 或 `attachment`）
-- `sender_id`（QQ `user_openid`）
+- `sender_id`（C2C 为 `user_openid`，群聊为 `member_openid`）
+- `sender_name` / `group_openid` / `chat_type` / `was_mentioned`（群聊）
 - `date`
 - `attachments`（如有）
 
@@ -210,16 +216,17 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 - 内嵌 webhook 接收、回调验证（`op = 13`）、ed25519 签名流程
 - webhook 请求验签（`X-Signature-Ed25519`、`X-Signature-Timestamp`）
 - WebSocket 接收路径（重连 / resume，可选分片）
-- C2C 入站适配、`msg_id` 去重、60 分钟被动文本回复
+- C2C / 群聊入站适配、`msg_id` 去重、60 分钟被动文本或 markdown 回复
+- 群聊文本收发；消息范围由 QQ 客户端群管理员控制
 - 同一 `session_id + msg_id + msg_seq` 的内存发送幂等
 - OpenAPI 错误暴露（HTTP 状态、平台业务码、`X-Tps-trace-ID`）及错误目录元数据
 - 覆盖配置、鉴权、签名、channel、webhook、websocket、gateway、插件 onboarding、C2C 等的自动化测试
 
 ### 尚未支持
 
-- QQ 群 / 频道 / 更广的私信发送 API
-- 除验证与基础 `{"op":12}` 确认外的更广 webhook 事件
-- 群聊及其他非 C2C 事件类型
+- QQ 频道（Guild）以及富媒体收发
+- 除验证、基础 `{"op":12}` 确认、C2C/群消息、交互查询外的更广 webhook 事件
+- 被动窗口过期后的主动推送
 - 启动后进程内动态分片再平衡
 
 ## 已确认的接口约定
@@ -240,8 +247,10 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 - 验证请求 `op = 13`；响应须含 `plain_token`，以及对 `event_ts + plain_token` 的 ed25519 签名
 - 普通 webhook 验签材料为 `timestamp + raw_body`
 - 事件载荷形状：`{ id, op, d, s, t }`
-- `C2C_MESSAGE_CREATE` 所属 intent：`GROUP_AND_C2C_EVENT`（`1 << 25`）
+- `C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` 所属 intent：`GROUP_AND_C2C_EVENT`（`1 << 25`）
 - 当前使用的 `C2C_MESSAGE_CREATE.d` 字段：`id`、`author.user_openid`、`content`、`timestamp`、`attachments`
+- 当前使用的群事件 `d` 字段：`id`、`group_openid`、`author.member_openid`、`content`、`timestamp`、`mentions`、`attachments`
+- 群聊发送：`POST /v2/groups/{group_openid}/messages`，body 与 C2C 相同（`msg_id`、`msg_seq`，以及 `content` + `msg_type = 0` 或 `markdown.content` + `msg_type = 2`）
 - WebSocket 关闭码 `4914` / `4915` 视为致命；`4006`–`4009`、`4900`–`4913` 等视为可重连
 
 ## 官方文档

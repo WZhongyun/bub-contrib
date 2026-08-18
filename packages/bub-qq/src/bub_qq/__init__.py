@@ -17,6 +17,7 @@ from .gateway import QQSessionStartLimit
 from .gateway import QQWebhookServer
 from .gateway import QQWebSocketClient
 from .protocol import QQC2CMessage
+from .protocol import QQGroupMessage
 from .protocol import QQOpenAPI
 from .protocol import QQOpenAPIError
 from .protocol import QQTokenProvider
@@ -32,4 +33,5 @@ __all__ = [
     "QQWebhookServer",
     "QQWebSocketClient",
     "QQC2CMessage",
+    "QQGroupMessage",
 ]

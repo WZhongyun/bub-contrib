@@ -225,6 +225,141 @@ def test_openapi_posts_c2c_text_message() -> None:
     asyncio.run(_run())
 
 
+def test_openapi_posts_group_text_message() -> None:
+    async def _run() -> None:
+        captured: dict[str, object] = {}
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            captured["path"] = request.url
+            captured["json"] = request.json
+            return FakeResponse(status=200, payload={"id": "reply-2", "timestamp": 123})
+
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
+            )
+
+        provider = QQTokenProvider(
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+            client=FakeTokenClient(token_handler),
+        )
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+
+        payload = await openapi.post_group_text_message(
+            group_openid="group-openid",
+            content="hello group",
+            msg_id="group-message-1",
+            msg_seq=1,
+        )
+
+        assert payload["id"] == "reply-2"
+        assert captured["path"] == "/v2/groups/group-openid/messages"
+        assert captured["json"] == {
+            "content": "hello group",
+            "msg_type": 0,
+            "msg_id": "group-message-1",
+            "msg_seq": 1,
+        }
+
+    asyncio.run(_run())
+
+
+def test_openapi_posts_c2c_markdown_message() -> None:
+    async def _run() -> None:
+        captured: dict[str, object] = {}
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            captured["path"] = request.url
+            captured["json"] = request.json
+            return FakeResponse(status=200, payload={"id": "reply-md", "timestamp": 123})
+
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
+            )
+
+        provider = QQTokenProvider(
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+            client=FakeTokenClient(token_handler),
+        )
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+
+        payload = await openapi.post_c2c_markdown_message(
+            openid="user-openid",
+            content="**hello**",
+            msg_id="message-1",
+            msg_seq=2,
+        )
+
+        assert payload["id"] == "reply-md"
+        assert captured["path"] == "/v2/users/user-openid/messages"
+        assert captured["json"] == {
+            "msg_type": 2,
+            "markdown": {"content": "**hello**"},
+            "msg_id": "message-1",
+            "msg_seq": 2,
+        }
+
+    asyncio.run(_run())
+
+
+def test_openapi_posts_group_markdown_message() -> None:
+    async def _run() -> None:
+        captured: dict[str, object] = {}
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            captured["path"] = request.url
+            captured["json"] = request.json
+            return FakeResponse(status=200, payload={"id": "reply-gmd", "timestamp": 123})
+
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
+            )
+
+        provider = QQTokenProvider(
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+            client=FakeTokenClient(token_handler),
+        )
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+
+        payload = await openapi.post_group_markdown_message(
+            group_openid="group-openid",
+            content="**hello group**",
+            msg_id="group-message-1",
+            msg_seq=1,
+        )
+
+        assert payload["id"] == "reply-gmd"
+        assert captured["path"] == "/v2/groups/group-openid/messages"
+        assert captured["json"] == {
+            "msg_type": 2,
+            "markdown": {"content": "**hello group**"},
+            "msg_id": "group-message-1",
+            "msg_seq": 1,
+        }
+
+    asyncio.run(_run())
+
+
 def test_openapi_error_exposes_trace_id_and_business_code() -> None:
     async def _run() -> None:
         async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:

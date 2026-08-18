@@ -7,13 +7,13 @@ Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 ## What it provides
 
 - Bub channel plugin (`entry point`: `qq` → `bub_qq.plugin`)
-- Inbound C2C messages (`C2C_MESSAGE_CREATE`) adapted to Bub `ChannelMessage`
-- Outbound C2C text replies via QQ OpenAPI (passive reply only)
+- Inbound C2C (`C2C_MESSAGE_CREATE`) and group (`GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE`) events adapted to Bub `ChannelMessage`
+- Outbound C2C and group text replies via QQ OpenAPI (passive reply only)
 - Receive transport switch: **webhook** or **websocket** (mutually exclusive on the QQ platform side)
 - `onboard_config` so `bub onboard` can collect `appid` / `secret` / `receive_mode`
 - Bundled skill resources under `src/skills/qq`
 
-Current focus is **single-chat (C2C)** receive and reply. Group / guild flows are not covered yet.
+Supports **single-chat (C2C)** and **group** text receive/reply. QQ Guild is not covered yet.
 
 ## Prerequisites
 
@@ -161,6 +161,8 @@ export BUB_QQ_SECRET=your_secret
 export BUB_QQ_RECEIVE_MODE=websocket
 ```
 
+Which group messages the bot hears is controlled in the QQ client by a group admin setting (all messages / last 10 @mentions / @only). Every received group message wakes the model; `was_mentioned` in the payload is `false` when the bot was not @mentioned, and an empty reply is not sent.
+
 ## Run
 
 QQ is a channel listener surface. Start Bub gateway after the plugin is installed and configured:
@@ -179,9 +181,12 @@ CLI chat (`bub chat`) does not replace the QQ channel; use gateway for QQ IO.
 | --- | --- |
 | Session ID (C2C) | `qq:c2c:<user_openid>` |
 | Chat ID (C2C) | `c2c:<user_openid>` |
-| Inbound event | `C2C_MESSAGE_CREATE` |
+| Session ID (group) | `qq:group:<group_openid>` |
+| Chat ID (group) | `group:<group_openid>` |
+| Inbound event | `C2C_MESSAGE_CREATE`, `GROUP_AT_MESSAGE_CREATE`, `GROUP_MESSAGE_CREATE` |
+| Group activation | every received group message is `is_active=true`; delivery scope is set in the QQ client by a group admin |
 | Command messages | inbound text starting with `,` is forwarded as Bub `kind=command` |
-| Outbound | Text (`msg_type = 0`), **passive reply** only (`msg_id` + plugin-managed `msg_seq`) |
+| Outbound | Text (`msg_type = 0`), or markdown (`msg_type = 2`) when the reply looks like markdown; **passive reply** only (`msg_id` + plugin-managed `msg_seq`) |
 | Passive window | replies are skipped once the latest inbound timestamp is older than 60 minutes |
 | Debounce | `needs_debounce = true` |
 
@@ -194,7 +199,8 @@ Inbound non-command messages are encoded as a JSON string, including fields like
 - `message`
 - `message_id`
 - `type` (`text` or `attachment`)
-- `sender_id` (QQ `user_openid`)
+- `sender_id` (C2C `user_openid`, group `member_openid`)
+- `sender_name` / `group_openid` / `chat_type` / `was_mentioned` (group)
 - `date`
 - `attachments` (when present)
 
@@ -210,16 +216,17 @@ Normal replies should return final text and let Bub outbound routing call `QQCha
 - Embedded webhook receiver, callback validation (`op = 13`), ed25519 signature flows
 - Webhook request verification (`X-Signature-Ed25519`, `X-Signature-Timestamp`)
 - WebSocket receive path with reconnect / resume and optional sharding
-- C2C inbound adaptation, `msg_id` dedupe, 60-minute passive text replies
+- C2C / group inbound adaptation, `msg_id` dedupe, 60-minute passive text or markdown replies
+- Group text receive/reply; message scope is controlled in the QQ client by a group admin
 - In-memory send idempotency for the same `session_id + msg_id + msg_seq`
 - OpenAPI error surfacing (HTTP status, platform code, `X-Tps-trace-ID`) and error catalog metadata
 - Automated tests for config, auth, signatures, channel, webhook, websocket, gateway, plugin onboarding, and C2C services
 
 ### Not yet
 
-- QQ group / channel / broader DM send APIs
-- Wider webhook event coverage beyond validation and basic `{"op":12}` ack
-- Group and other non-C2C event types
+- QQ Guild and rich-media send/receive
+- Wider webhook event coverage beyond validation, basic `{"op":12}` ack, C2C/group messages, and interaction query
+- Active push after the passive reply window expires
 - Dynamic in-process shard rebalancing after startup
 
 ## Confirmed interface rules
@@ -240,8 +247,10 @@ From official QQ Bot docs (API auth + event subscription):
 - Validation requests use `op = 13`; response must include `plain_token` and ed25519 signature over `event_ts + plain_token`
 - Normal webhook verification uses `timestamp + raw_body`
 - Event payload shape: `{ id, op, d, s, t }`
-- `C2C_MESSAGE_CREATE` intent: `GROUP_AND_C2C_EVENT` (`1 << 25`)
+- `C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` intent: `GROUP_AND_C2C_EVENT` (`1 << 25`)
 - Documented `C2C_MESSAGE_CREATE.d` fields used here: `id`, `author.user_openid`, `content`, `timestamp`, `attachments`
+- Group event `d` fields used here: `id`, `group_openid`, `author.member_openid`, `content`, `timestamp`, `mentions`, `attachments`
+- Group send: `POST /v2/groups/{group_openid}/messages` with the same body as C2C (`msg_id`, `msg_seq`, plus either `content` + `msg_type = 0` or `markdown.content` + `msg_type = 2`)
 - WebSocket close codes `4914` / `4915` are fatal; codes such as `4006`–`4009` and `4900`–`4913` are treated as reconnectable
 
 ## Official documentation
