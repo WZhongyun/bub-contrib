@@ -55,7 +55,8 @@ The DeepSeek Harness SDK is synchronous, so the plugin runs it in a worker threa
 does not block Bub's async event loop. Runtime processes are reused until Bub exits.
 Calls for the same Bub session reuse one runtime-local session id, preserving the
 Harness conversation and persistent shell state without colliding with logs left by a
-previous Bub process. Session storage defaults to `bub.home / "dsh"`.
+previous Bub process. This history is retained only for the lifetime of the current Bub
+process. Session storage defaults to `bub.home / "dsh"`.
 
 String prompts and structured lists of JSON content blocks are passed to
 `DeepSeekHarness.run()` unchanged.
@@ -70,8 +71,10 @@ Bub workspace. Run it only with filesystem permissions appropriate for the task.
 ## Current Limitations
 
 - DeepSeek Harness is in developer preview and may introduce breaking SDK changes.
-- Restarting Bub creates new Harness session ids. The current SDK cannot restore a
-  persisted session into a new runtime process, although existing logs remain on disk.
+- Session history does not survive a Bub restart. Restarting Bub creates new Harness
+  session ids, and the current SDK cannot restore a persisted session into a new runtime
+  process. Files under `session_root` remain as logs, but they are not replayed to
+  restore the previous conversation, tool state, or shell state.
 - Cancelling the Bub coroutine cannot forcibly stop work already running in Python's
   worker thread. The current SDK has no whole-turn timeout while it waits for the
   runtime to become idle.
