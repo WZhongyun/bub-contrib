@@ -138,6 +138,31 @@ def test_c2c_inbound_service_dedupes_repeated_messages() -> None:
     assert service.parse_inbound(_payload("message-1")) is None
 
 
+def test_c2c_inbound_includes_quoted_messages_in_payload() -> None:
+    import json
+
+    service = QQC2CInboundService(
+        channel_name="qq",
+        deduper=QQInboundDeduper(16),
+        state=_state(),
+        policy=QQAccessPolicy(),
+    )
+    payload = _payload(content="回复：说得对")
+    payload["d"]["message_type"] = 103  # type: ignore[index]
+    payload["d"]["msg_elements"] = [  # type: ignore[index]
+        {"message_type": 103, "content": "原始消息", "author": {"username": "Bob"}}
+    ]
+
+    parsed = service.parse_inbound(payload)
+
+    assert parsed is not None
+    _, channel_message = parsed
+    content = json.loads(channel_message.content)
+    assert content["quoted_messages"] == [
+        {"message": "原始消息", "sender_name": "Bob"}
+    ]
+
+
 def test_c2c_inbound_service_drops_users_outside_allowlist() -> None:
     service = QQC2CInboundService(
         channel_name="qq",
