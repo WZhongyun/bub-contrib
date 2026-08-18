@@ -13,6 +13,7 @@ from bub_qq.inbound.interaction import parse_interaction_event
 from bub_qq.outbound.group import QQGroupSendService
 from bub_qq.protocol.models import QQGroupMessage
 from bub_qq.protocol.models import QQMention
+from bub_qq.security import QQAccessPolicy
 from bub_qq.session import QQInboundDeduper
 from bub_qq.session import QQSessionState
 
@@ -63,23 +64,38 @@ def _state() -> QQSessionState:
     return QQSessionState()
 
 
+def _service(
+    state: QQSessionState, policy: QQAccessPolicy | None = None
+) -> QQGroupInboundService:
+    return QQGroupInboundService(
+        channel_name="qq",
+        deduper=QQInboundDeduper(16),
+        state=state,
+        policy=policy if policy is not None else QQAccessPolicy(),
+    )
+
+
 def _payload(
     *,
     event_type: str = "GROUP_AT_MESSAGE_CREATE",
     message_id: str = "group-message-1",
     content: str = "<@bot-openid> hello",
     mentions: list[dict[str, object]] | None = None,
+    member_role: str | None = None,
 ) -> dict[str, object]:
+    author: dict[str, object] = {
+        "member_openid": "member-openid",
+        "username": "Alice",
+    }
+    if member_role is not None:
+        author["member_role"] = member_role
     return {
         "id": "event-1",
         "op": 0,
         "s": 8,
         "t": event_type,
         "d": {
-            "author": {
-                "member_openid": "member-openid",
-                "username": "Alice",
-            },
+            "author": author,
             "content": content,
             "id": message_id,
             "group_openid": "group-openid",
@@ -99,11 +115,7 @@ def _payload(
 
 def test_group_inbound_parses_at_message_as_active() -> None:
     state = _state()
-    service = QQGroupInboundService(
-        channel_name="qq",
-        deduper=QQInboundDeduper(16),
-        state=state,
-    )
+    service = _service(state)
 
     parsed = service.parse_inbound(_payload())
 
@@ -125,11 +137,7 @@ def test_group_inbound_parses_at_message_as_active() -> None:
 
 def test_group_inbound_unmentioned_message_is_still_active() -> None:
     state = _state()
-    service = QQGroupInboundService(
-        channel_name="qq",
-        deduper=QQInboundDeduper(16),
-        state=state,
-    )
+    service = _service(state)
 
     parsed = service.parse_inbound(
         _payload(
@@ -148,14 +156,50 @@ def test_group_inbound_unmentioned_message_is_still_active() -> None:
 
 
 def test_group_inbound_dedupes_repeated_messages() -> None:
-    service = QQGroupInboundService(
-        channel_name="qq",
-        deduper=QQInboundDeduper(16),
-        state=_state(),
-    )
+    service = _service(_state())
 
     assert service.parse_inbound(_payload(message_id="group-message-1")) is not None
     assert service.parse_inbound(_payload(message_id="group-message-1")) is None
+
+
+def test_group_inbound_drops_groups_outside_allowlist() -> None:
+    service = _service(
+        _state(), QQAccessPolicy(allow_groups=frozenset({"another-group"}))
+    )
+
+    assert service.parse_inbound(_payload()) is None
+
+
+def test_group_inbound_parses_member_role_into_payload() -> None:
+    service = _service(_state())
+
+    parsed = service.parse_inbound(_payload(member_role="admin"))
+
+    assert parsed is not None
+    message, channel_message = parsed
+    assert message.member_role == "admin"
+    payload = json.loads(channel_message.content)
+    assert payload["sender_role"] == "admin"
+
+
+def test_group_inbound_gates_comma_commands_by_role() -> None:
+    admin_parsed = _service(_state()).parse_inbound(
+        _payload(content="<@bot-openid> ,status", member_role="admin")
+    )
+    member_parsed = _service(_state()).parse_inbound(
+        _payload(content="<@bot-openid> ,status", member_role="member")
+    )
+    allowlisted_parsed = _service(
+        _state(), QQAccessPolicy(admin_users=frozenset({"member-openid"}))
+    ).parse_inbound(_payload(content="<@bot-openid> ,status", member_role="member"))
+
+    assert admin_parsed is not None
+    assert admin_parsed[1].kind == "command"
+    assert member_parsed is not None
+    assert member_parsed[1].kind == "normal"
+    assert ",status" in json.loads(member_parsed[1].content)["message"]
+    assert allowlisted_parsed is not None
+    assert allowlisted_parsed[1].kind == "command"
 
 
 def test_strip_mention_text_removes_bot_and_keeps_others() -> None:
@@ -267,9 +311,10 @@ def test_group_channel_message_command_is_always_active() -> None:
         event_id="event-1",
         sequence=1,
         event_type="GROUP_MESSAGE_CREATE",
+        member_role="owner",
     )
 
-    channel_message = build_group_channel_message("qq", message)
+    channel_message = build_group_channel_message("qq", message, allow_command=True)
 
     assert channel_message.kind == "command"
     assert channel_message.is_active is True

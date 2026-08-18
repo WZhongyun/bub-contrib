@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import bub
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
+
+type ToolPolicy = Literal["open", "restricted", "locked"]
 
 
 @bub.config(name="qq")
@@ -52,3 +56,57 @@ class QQConfig(bub.Settings):
     websocket_intents: int = 1 << 25
     websocket_use_shard_gateway: bool = False
     websocket_reconnect_delay_seconds: float = 5.0
+    admin_users: str = Field(
+        default="",
+        description=(
+            "Comma-separated user openids with full comma-command and tool"
+            " access in every scope. Comma commands from anyone else are"
+            " treated as plain text (in groups, owners/admins also qualify)."
+        ),
+    )
+    allow_users: str = Field(
+        default="",
+        description=(
+            "Comma-separated C2C user openid allowlist. When set, C2C"
+            " messages from anyone else are dropped. Empty allows everyone."
+        ),
+    )
+    allow_groups: str = Field(
+        default="",
+        description=(
+            "Comma-separated group openid allowlist. When set, messages from"
+            " other groups are dropped. Empty allows every group."
+        ),
+    )
+    group_tool_policy: ToolPolicy = Field(
+        default="restricted",
+        description=(
+            "Tool policy for group sessions: 'open' allows all tools,"
+            " 'restricted' denies shell/file-write/subagent tools,"
+            " 'locked' denies every tool. Group owners/admins and"
+            " admin_users bypass the policy."
+        ),
+    )
+    c2c_tool_policy: ToolPolicy = Field(
+        default="open",
+        description="Tool policy for C2C sessions; same values as group_tool_policy.",
+    )
+    denied_tools: str = Field(
+        default="",
+        description=(
+            "Extra comma-separated tool-name glob patterns denied under the"
+            " 'restricted' policy, e.g. 'web.fetch,tape.*'."
+        ),
+    )
+    llm_rate_limit_per_minute: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Max LLM calls per sender per session per minute; exceeding calls"
+            " are short-circuited with llm_rate_limit_notice. 0 disables."
+        ),
+    )
+    llm_rate_limit_notice: str = Field(
+        default="请求过于频繁，请稍后再试。",
+        description="Reply text used when a sender hits the LLM rate limit.",
+    )

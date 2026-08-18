@@ -9,6 +9,8 @@ from loguru import logger
 
 from ..protocol.models import QQGroupMessage
 from ..protocol.models import QQMention
+from ..security import QQ_CONTEXT_KEY
+from ..security import QQAccessPolicy
 from ..session import QQInboundDeduper
 from ..session import QQSessionState
 from ..session import remember_session
@@ -29,10 +31,12 @@ class QQGroupInboundService:
         channel_name: str,
         deduper: QQInboundDeduper,
         state: QQSessionState,
+        policy: QQAccessPolicy,
     ) -> None:
         self._channel_name = channel_name
         self._deduper = deduper
         self._state = state
+        self._policy = policy
 
     def parse_inbound(
         self, payload: dict[str, Any]
@@ -47,7 +51,22 @@ class QQGroupInboundService:
             logger.info("qq.group.duplicate message_id={}", message.message_id)
             return None
 
-        channel_message = build_group_channel_message(self._channel_name, message)
+        if not self._policy.group_allowed(message.group_openid):
+            logger.warning(
+                "qq.group.blocked group_openid={} reason=not_in_allow_groups",
+                message.group_openid,
+            )
+            return None
+
+        channel_message = build_group_channel_message(
+            self._channel_name,
+            message,
+            allow_command=self._policy.may_run_command(
+                scope="group",
+                sender_id=message.member_openid,
+                sender_role=message.member_role,
+            ),
+        )
         remember_session(
             self._state,
             session_id=channel_message.session_id,
@@ -60,20 +79,42 @@ class QQGroupInboundService:
 def build_group_channel_message(
     channel_name: str,
     message: QQGroupMessage,
+    *,
+    allow_command: bool = False,
 ) -> ChannelMessage:
     session_id = f"{channel_name}:group:{message.group_openid}"
     chat_id = f"group:{message.group_openid}"
     text = strip_mention_text(message.content, message.mentions)
     was_mentioned = group_was_mentioned(message)
+    context = {
+        QQ_CONTEXT_KEY: exclude_none(
+            {
+                "scope": "group",
+                "sender_id": message.member_openid,
+                "sender_role": message.member_role,
+                "group_openid": message.group_openid,
+                "message_id": message.message_id,
+                "was_mentioned": was_mentioned,
+            }
+        )
+    }
 
     if text.startswith(","):
-        return ChannelMessage(
-            session_id=session_id,
-            content=text,
-            channel=channel_name,
-            chat_id=chat_id,
-            kind="command",
-            is_active=True,
+        if allow_command:
+            return ChannelMessage(
+                session_id=session_id,
+                content=text,
+                channel=channel_name,
+                chat_id=chat_id,
+                kind="command",
+                is_active=True,
+                context=context,
+            )
+        logger.warning(
+            "qq.group.command_denied group_openid={} member_openid={} role={}",
+            message.group_openid,
+            message.member_openid,
+            message.member_role,
         )
 
     payload = {
@@ -82,6 +123,7 @@ def build_group_channel_message(
         "type": "text" if not message.attachments else "attachment",
         "sender_id": message.member_openid,
         "sender_name": message.sender_name,
+        "sender_role": message.member_role,
         "group_openid": message.group_openid,
         "chat_type": "group",
         "was_mentioned": was_mentioned,
@@ -94,6 +136,7 @@ def build_group_channel_message(
         channel=channel_name,
         chat_id=chat_id,
         is_active=True,
+        context=context,
     )
 
 
