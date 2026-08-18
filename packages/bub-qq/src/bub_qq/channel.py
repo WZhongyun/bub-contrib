@@ -27,6 +27,7 @@ from .outbound.group import QQGroupSendService
 from .protocol.auth import QQTokenProvider
 from .protocol.errors import QQOpenAPIError
 from .protocol.openapi import QQOpenAPI
+from .security import QQAccessPolicy
 from .session import QQInboundDeduper
 from .session import QQSessionState
 
@@ -49,15 +50,18 @@ class QQChannel(Channel):
         self._session_state = QQSessionState(
             max_entries=self._config.session_state_size
         )
+        self._policy = QQAccessPolicy.from_config(self._config)
         self._c2c_inbound = QQC2CInboundService(
             channel_name=self.name,
             deduper=self._deduper,
             state=self._session_state,
+            policy=self._policy,
         )
         self._group_inbound = QQGroupInboundService(
             channel_name=self.name,
             deduper=self._deduper,
             state=self._session_state,
+            policy=self._policy,
         )
         self._c2c_send = QQC2CSendService(
             channel_name=self.name,

@@ -145,6 +145,14 @@ QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 
 | `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | 近期入站 `msg_id` 去重缓存大小 |
 | `session_state_size` | `BUB_QQ_SESSION_STATE_SIZE` | `1024` | 被动回复会话状态与发送记录的内存条数上限（超出后淘汰最旧条目） |
 | `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | 入站消息之后尝试被动回复的时间窗口（秒） |
+| `admin_users` | `BUB_QQ_ADMIN_USERS` | 空 | 逗号分隔的用户 openid，在所有场景拥有完整的逗号命令与工具权限 |
+| `allow_users` | `BUB_QQ_ALLOW_USERS` | 空 | 逗号分隔的 C2C 白名单；设置后其他用户的私聊消息会被丢弃 |
+| `allow_groups` | `BUB_QQ_ALLOW_GROUPS` | 空 | 逗号分隔的群白名单；设置后其他群的消息会被丢弃 |
+| `group_tool_policy` | `BUB_QQ_GROUP_TOOL_POLICY` | `restricted` | 群会话工具策略：`open` / `restricted`（禁用 `bash*`、`fs.write`、`fs.edit`、`subagent`）/ `locked`（禁用全部工具） |
+| `c2c_tool_policy` | `BUB_QQ_C2C_TOOL_POLICY` | `open` | C2C 会话工具策略，取值同 `group_tool_policy` |
+| `denied_tools` | `BUB_QQ_DENIED_TOOLS` | 空 | `restricted` 策略下额外禁用的工具名 glob，逗号分隔，如 `web.fetch,tape.*` |
+| `llm_rate_limit_per_minute` | `BUB_QQ_LLM_RATE_LIMIT_PER_MINUTE` | `0` | 每发送者在每个会话内每分钟的 LLM 调用上限；`0` 表示不限 |
+| `llm_rate_limit_notice` | `BUB_QQ_LLM_RATE_LIMIT_NOTICE` | `请求过于频繁，请稍后再试。` | 触发频控时回复的文本 |
 | `websocket_intents` | `BUB_QQ_WEBSOCKET_INTENTS` | `1 << 25` | WebSocket identify intents（`GROUP_AND_C2C_EVENT`） |
 | `websocket_use_shard_gateway` | `BUB_QQ_WEBSOCKET_USE_SHARD_GATEWAY` | `false` | 是否按 `/gateway/bot` 建议分片数连接 |
 | `websocket_reconnect_delay_seconds` | `BUB_QQ_WEBSOCKET_RECONNECT_DELAY_SECONDS` | `5` | WebSocket 断线后重连延迟 |
@@ -165,6 +173,18 @@ export BUB_QQ_RECEIVE_MODE=websocket
 ```
 
 群聊能听到哪些消息，由 QQ 客户端里群管理员的「允许机器人可获取的群聊消息范围」决定（全部消息 / @ 最近 10 条 / 仅 @）。插件对收到的每条群消息都会唤醒模型；未 @ 时 payload 里 `was_mentioned` 为 `false`，模型可选择不回复（空文本不会发出）。
+
+## 安全
+
+插件为公开聊天场景内置了多层 fail-closed 防护：
+
+1. **白名单** —— 设置 `allow_users` / `allow_groups` 后，名单外的消息在进入模型之前即被丢弃。
+2. **逗号命令门控** —— 以 `,` 开头的入站文本只对授权发送者生效：群聊要求平台上报的 `member_role` 为 `owner` / `admin`，或发送者在 `admin_users` 中；私聊仅 `admin_users` 可用。其他人的 `,` 消息按普通文本转发给模型。
+3. **工具策略** —— `before_tool_call` hook 按场景拒绝危险工具。群会话默认 `restricted`（禁用 `bash*`、`fs.write`、`fs.edit`、`subagent`）；私聊默认 `open`。第 2 条中的授权发送者不受策略限制。
+4. **频控** —— `before_llm_call` hook 按「发送者 + 会话」限制每分钟 LLM 调用次数（`llm_rate_limit_per_minute`），超限时用 `llm_rate_limit_notice` 短路本次调用。
+5. **审计日志** —— `after_llm_call` / `after_tool_call` hook 输出 `qq.audit.llm` / `qq.audit.tool` 日志，包含会话、发送者、角色、工具/模型、耗时与错误类型。
+
+注意：不做任何配置时，私聊里的逗号命令不可用（fail-closed）。请把自己的 openid 加入 `admin_users` 以保留命令权限。
 
 ## 运行
 
@@ -188,7 +208,7 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 | Chat ID（群） | `group:<group_openid>` |
 | 入站事件 | `C2C_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` |
 | 群聊唤醒 | 收到的群消息一律 `is_active=true`；消息范围由 QQ 客户端群管理员设置 |
-| 命令消息 | 以 `,` 开头的入站文本会转成 Bub `kind=command` |
+| 命令消息 | 以 `,` 开头的入站文本仅对授权发送者转成 Bub `kind=command`（见「安全」），其他人按普通文本处理 |
 | 出站 | 文本（`msg_type = 0`），或在回复看起来像 markdown 时发送 markdown（`msg_type = 2`）；**仅被动回复**（`msg_id` + 插件内部管理的 `msg_seq`） |
 | 被动窗口 | 最近一条入站时间超过 60 分钟后，回复会被跳过 |
 | Debounce | `needs_debounce = true` |
@@ -203,7 +223,7 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 - `message_id`
 - `type`（`text` 或 `attachment`）
 - `sender_id`（C2C 为 `user_openid`，群聊为 `member_openid`）
-- `sender_name` / `group_openid` / `chat_type` / `was_mentioned`（群聊）
+- `sender_name` / `sender_role` / `group_openid` / `chat_type` / `was_mentioned`（群聊）
 - `date`
 - `attachments`（如有）
 
@@ -223,7 +243,8 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 - 群聊文本收发；消息范围由 QQ 客户端群管理员控制
 - 同一 `session_id + msg_id + msg_seq` 的内存发送幂等
 - OpenAPI 错误暴露（HTTP 状态、平台业务码、`X-Tps-trace-ID`）及错误目录元数据
-- 覆盖配置、鉴权、签名、channel、webhook、websocket、gateway、插件 onboarding、C2C 等的自动化测试
+- 多层安全防护：白名单、按角色门控的逗号命令、按场景的工具策略、LLM 频控与审计日志（见「安全」）
+- 覆盖配置、鉴权、签名、channel、webhook、websocket、gateway、插件 onboarding、C2C/群聊服务、安全策略等的自动化测试
 
 ### 尚未支持
 

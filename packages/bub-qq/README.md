@@ -145,6 +145,14 @@ Gateway start fails if `appid` / `secret` are empty, or if `receive_mode` is not
 | `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | Recent inbound `msg_id` cache size |
 | `session_state_size` | `BUB_QQ_SESSION_STATE_SIZE` | `1024` | Max sessions / send records kept in memory for passive replies (oldest entries are evicted) |
 | `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | How long after an inbound message passive replies are attempted |
+| `admin_users` | `BUB_QQ_ADMIN_USERS` | empty | Comma-separated user openids with full comma-command and tool access in every scope |
+| `allow_users` | `BUB_QQ_ALLOW_USERS` | empty | Comma-separated C2C allowlist; when set, C2C messages from anyone else are dropped |
+| `allow_groups` | `BUB_QQ_ALLOW_GROUPS` | empty | Comma-separated group allowlist; when set, messages from other groups are dropped |
+| `group_tool_policy` | `BUB_QQ_GROUP_TOOL_POLICY` | `restricted` | Tool policy for group sessions: `open` / `restricted` (denies `bash*`, `fs.write`, `fs.edit`, `subagent`) / `locked` (denies all tools) |
+| `c2c_tool_policy` | `BUB_QQ_C2C_TOOL_POLICY` | `open` | Tool policy for C2C sessions; same values as `group_tool_policy` |
+| `denied_tools` | `BUB_QQ_DENIED_TOOLS` | empty | Extra comma-separated tool-name glob patterns denied under `restricted`, e.g. `web.fetch,tape.*` |
+| `llm_rate_limit_per_minute` | `BUB_QQ_LLM_RATE_LIMIT_PER_MINUTE` | `0` | Max LLM calls per sender per session per minute; `0` disables |
+| `llm_rate_limit_notice` | `BUB_QQ_LLM_RATE_LIMIT_NOTICE` | `请求过于频繁，请稍后再试。` | Reply text used when a sender hits the LLM rate limit |
 | `websocket_intents` | `BUB_QQ_WEBSOCKET_INTENTS` | `1 << 25` | WebSocket identify intents (`GROUP_AND_C2C_EVENT`) |
 | `websocket_use_shard_gateway` | `BUB_QQ_WEBSOCKET_USE_SHARD_GATEWAY` | `false` | Use `/gateway/bot` recommended shard count |
 | `websocket_reconnect_delay_seconds` | `BUB_QQ_WEBSOCKET_RECONNECT_DELAY_SECONDS` | `5` | Delay before WebSocket reconnect |
@@ -165,6 +173,18 @@ export BUB_QQ_RECEIVE_MODE=websocket
 ```
 
 Which group messages the bot hears is controlled in the QQ client by a group admin setting (all messages / last 10 @mentions / @only). Every received group message wakes the model; `was_mentioned` in the payload is `false` when the bot was not @mentioned, and an empty reply is not sent.
+
+## Security
+
+The plugin ships with layered, fail-closed protections for public chats:
+
+1. **Allowlists** — when `allow_users` / `allow_groups` are set, messages from anyone else are dropped before reaching the model.
+2. **Comma-command gate** — inbound text starting with `,` runs as a Bub command only for authorized senders: in groups the platform-reported `member_role` must be `owner` / `admin`, or the sender must be in `admin_users`; in C2C only `admin_users` qualify. Everyone else's `,` message is forwarded as plain text.
+3. **Tool policy** — a `before_tool_call` hook denies dangerous tools per scope. Groups default to `restricted` (no `bash*`, `fs.write`, `fs.edit`, `subagent`); C2C defaults to `open`. Authorized senders (rule 2) bypass the policy.
+4. **Rate limit** — a `before_llm_call` hook caps LLM calls per sender per session (`llm_rate_limit_per_minute`) and short-circuits the turn with `llm_rate_limit_notice` when exceeded.
+5. **Audit log** — `after_llm_call` / `after_tool_call` hooks emit `qq.audit.llm` / `qq.audit.tool` log lines with session, sender, role, tool/model, duration, and error type.
+
+Note: with no configuration, comma commands are unusable in C2C (fail-closed). Set `admin_users` to your own openid to keep command access.
 
 ## Run
 
@@ -188,7 +208,7 @@ CLI chat (`bub chat`) does not replace the QQ channel; use gateway for QQ IO.
 | Chat ID (group) | `group:<group_openid>` |
 | Inbound event | `C2C_MESSAGE_CREATE`, `GROUP_AT_MESSAGE_CREATE`, `GROUP_MESSAGE_CREATE` |
 | Group activation | every received group message is `is_active=true`; delivery scope is set in the QQ client by a group admin |
-| Command messages | inbound text starting with `,` is forwarded as Bub `kind=command` |
+| Command messages | inbound text starting with `,` is forwarded as Bub `kind=command` for authorized senders only (see Security); otherwise treated as plain text |
 | Outbound | Text (`msg_type = 0`), or markdown (`msg_type = 2`) when the reply looks like markdown; **passive reply** only (`msg_id` + plugin-managed `msg_seq`) |
 | Passive window | replies are skipped once the latest inbound timestamp is older than 60 minutes |
 | Debounce | `needs_debounce = true` |
@@ -203,7 +223,7 @@ Inbound non-command messages are encoded as a JSON string, including fields like
 - `message_id`
 - `type` (`text` or `attachment`)
 - `sender_id` (C2C `user_openid`, group `member_openid`)
-- `sender_name` / `group_openid` / `chat_type` / `was_mentioned` (group)
+- `sender_name` / `sender_role` / `group_openid` / `chat_type` / `was_mentioned` (group)
 - `date`
 - `attachments` (when present)
 
@@ -223,7 +243,8 @@ Normal replies should return final text and let Bub outbound routing call `QQCha
 - Group text receive/reply; message scope is controlled in the QQ client by a group admin
 - In-memory send idempotency for the same `session_id + msg_id + msg_seq`
 - OpenAPI error surfacing (HTTP status, platform code, `X-Tps-trace-ID`) and error catalog metadata
-- Automated tests for config, auth, signatures, channel, webhook, websocket, gateway, plugin onboarding, and C2C services
+- Layered security: allowlists, role-gated comma commands, per-scope tool policy, LLM rate limiting, and audit logs (see Security)
+- Automated tests for config, auth, signatures, channel, webhook, websocket, gateway, plugin onboarding, C2C/group services, and security policies
 
 ### Not yet
 

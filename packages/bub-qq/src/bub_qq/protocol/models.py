@@ -69,6 +69,8 @@ class QQGroupMessage:
     event_id: str | None
     sequence: int | None
     event_type: str | None
+    member_role: str | None = None
+    """Sender's role in the group: ``member`` / ``admin`` / ``owner``."""
 
     @classmethod
     def from_event(cls, payload: dict[str, Any]) -> QQGroupMessage:
@@ -109,6 +111,7 @@ class QQGroupMessage:
             event_id=_optional_str(payload.get("id")),
             sequence=_optional_int(payload.get("s")),
             event_type=_optional_str(payload.get("t")),
+            member_role=_optional_str(author.get("member_role")),
         )
 
 

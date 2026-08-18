@@ -40,6 +40,7 @@ def test_group_message_parses_at_event() -> None:
                 "author": {
                     "member_openid": "member-openid",
                     "username": "Alice",
+                    "member_role": "owner",
                 },
                 "content": "<@bot-openid> hello",
                 "id": "group-message-1",
@@ -65,3 +66,20 @@ def test_group_message_parses_at_event() -> None:
     assert message.event_type == "GROUP_AT_MESSAGE_CREATE"
     assert message.mentions[0].is_you is True
     assert message.attachments == ()
+    assert message.member_role == "owner"
+
+
+def test_group_message_member_role_defaults_to_none() -> None:
+    message = QQGroupMessage.from_event(
+        {
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "d": {
+                "author": {"member_openid": "member-openid"},
+                "content": "hello",
+                "id": "group-message-2",
+                "group_openid": "group-openid",
+            },
+        }
+    )
+
+    assert message.member_role is None
