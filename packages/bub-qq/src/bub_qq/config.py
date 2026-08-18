@@ -22,7 +22,7 @@ class QQConfig(bub.Settings):
     appid: str = ""
     secret: str = ""
     token_url: str = "https://bots.qq.com/app/getAppAccessToken"
-    openapi_base_url: str = "https://api.sgroup.qq.com"
+    openapi_base_url: str = "https://api.bot.qq.com"
     timeout_seconds: float = 30.0
     token_refresh_skew_seconds: int = 60
     receive_mode: str = Field(
