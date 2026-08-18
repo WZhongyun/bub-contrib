@@ -145,6 +145,9 @@ QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 
 | `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | 近期入站 `msg_id` 去重缓存大小 |
 | `session_state_size` | `BUB_QQ_SESSION_STATE_SIZE` | `1024` | 被动回复会话状态与发送记录的内存条数上限（超出后淘汰最旧条目） |
 | `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | 入站消息之后尝试被动回复的时间窗口（秒） |
+| `active_messages` | `BUB_QQ_ACTIVE_MESSAGES` | `false` | 无法被动回复时改发群主动消息（不带 `msg_id`）；需要群管理员在 QQ 客户端允许机器人主动发言 |
+| `passive_replies_per_msg_id` | `BUB_QQ_PASSIVE_REPLIES_PER_MSG_ID` | `4` | 每条入站 `msg_id` 的被动回复本地上限；超出后降级为主动消息（若已开启）或跳过 |
+| `state_file` | `BUB_QQ_STATE_FILE` | 空 | 持久化平台开关状态（主动消息授权、群 claw_cfg）的 JSON 文件；留空使用 `<bub home>/qq/state.json` |
 | `admin_users` | `BUB_QQ_ADMIN_USERS` | 空 | 逗号分隔的用户 openid，在所有场景拥有完整的逗号命令与工具权限 |
 | `allow_users` | `BUB_QQ_ALLOW_USERS` | 空 | 逗号分隔的 C2C 白名单；设置后其他用户的私聊消息会被丢弃 |
 | `allow_groups` | `BUB_QQ_ALLOW_GROUPS` | 空 | 逗号分隔的群白名单；设置后其他群的消息会被丢弃 |
@@ -209,11 +212,12 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 | 入站事件 | `C2C_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` |
 | 群聊唤醒 | 收到的群消息一律 `is_active=true`；消息范围由 QQ 客户端群管理员设置 |
 | 命令消息 | 以 `,` 开头的入站文本仅对授权发送者转成 Bub `kind=command`（见「安全」），其他人按普通文本处理 |
-| 出站 | 文本（`msg_type = 0`），或在回复看起来像 markdown 时发送 markdown（`msg_type = 2`）；**仅被动回复**（`msg_id` + 插件内部管理的 `msg_seq`） |
-| 被动窗口 | 最近一条入站时间超过 60 分钟后，回复会被跳过 |
+| 出站 | 文本（`msg_type = 0`），或在回复看起来像 markdown 时发送 markdown（`msg_type = 2`）；**优先被动回复**（`msg_id` + 插件内部管理的 `msg_seq`），群聊可选**主动消息兜底**（`active_messages`，仅纯文本） |
+| 被动窗口 | 最近一条入站时间超过 60 分钟后停止被动回复；群聊在开启主动消息时降级为主动发送 |
+| 主动授权 | `GROUP_MSG_RECEIVE` / `GROUP_MSG_REJECT`（及 C2C 对应事件）按群/用户持久化；管理员明确拒绝后跳过主动发送 |
 | Debounce | `needs_debounce = true` |
 
-有意不使用主动推送：官方文档写明 C2C 主动推送已于 2025-04-21 停止提供。
+C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21 停止提供。群主动消息需要双侧开启（机器人配置 `active_messages` + 群管理员在 QQ 客户端授权），并消耗平台配额。
 
 ## 载荷形状
 
@@ -244,13 +248,17 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 - 同一 `session_id + msg_id + msg_seq` 的内存发送幂等
 - OpenAPI 错误暴露（HTTP 状态、平台业务码、`X-Tps-trace-ID`）及错误目录元数据
 - 多层安全防护：白名单、按角色门控的逗号命令、按场景的工具策略、LLM 频控与审计日志（见「安全」）
-- 覆盖配置、鉴权、签名、channel、webhook、websocket、gateway、插件 onboarding、C2C/群聊服务、安全策略等的自动化测试
+- 群主动消息作为被动回复的兜底（`active_messages`），并通过 `*_MSG_RECEIVE` / `*_MSG_REJECT` 事件按群/用户持久化授权状态
+- claw_cfg 闭环：`INTERACTION_CREATE` 2002 变更按群持久化，2001 查询回显真实 `require_mention` 状态
+- 304023/304024（异步人工审核）按「待审核成功」处理，不再当作发送失败
+- 覆盖配置、鉴权、签名、channel、webhook、websocket、gateway、插件 onboarding、C2C/群聊服务、安全策略、平台状态存储等的自动化测试
 
 ### 尚未支持
 
 - QQ 频道（Guild）以及富媒体收发
-- 除验证、基础 `{"op":12}` 确认、C2C/群消息、交互查询外的更广 webhook 事件
-- 被动窗口过期后的主动推送
+- 除验证、基础 `{"op":12}` 确认、C2C/群消息、消息开关事件、交互查询/变更外的更广 webhook 事件
+- C2C 主动推送（平台已于 2025-04-21 停止提供）
+- 群主动消息里的 markdown（需报备模板，主动路径仅发纯文本）
 - 启动后进程内动态分片再平衡
 
 ## 已确认的接口约定

@@ -548,6 +548,52 @@ def test_c2c_send_service_treats_remote_duplicate_as_already_sent() -> None:
     asyncio.run(_run())
 
 
+def test_c2c_send_service_treats_async_audit_as_pending_success() -> None:
+    async def _run() -> None:
+        state = _state()
+        state.latest_message_id_by_session["qq:c2c:user-openid"] = "message-1"
+        state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
+            "2099-01-01T00:00:00+00:00"
+        )
+        openapi = FailingOpenAPIStub(
+            QQOpenAPIError(
+                status_code=202,
+                trace_id="trace-audit",
+                error_code=304024,
+                error_message="回复消息异步调用成功，等待人工审核",
+                known=QQKnownOpenAPIError(
+                    304024,
+                    "REPLY_MSG_ASYNC_OK",
+                    "回复消息异步调用成功，等待人工审核",
+                    "async",
+                    False,
+                ),
+            )
+        )
+        service = QQC2CSendService(
+            channel_name="qq",
+            receive_mode="webhook",
+            state=state,
+            openapi=openapi,
+        )
+        message = ChannelMessage(
+            session_id="qq:c2c:user-openid",
+            chat_id="c2c:user-openid",
+            content="hello",
+            channel="qq",
+        )
+
+        first = await service.send(message)
+        second = await service.send(message)
+
+        assert first == {"status": "pending_audit"}
+        assert second == {"status": "already_sent"}
+        # The audited message is recorded locally, so the retry never hits QQ.
+        assert openapi.calls == 1
+
+    asyncio.run(_run())
+
+
 def test_c2c_send_service_dedupes_identical_content_locally() -> None:
     async def _run() -> None:
         state = _state()
