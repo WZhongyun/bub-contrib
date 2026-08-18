@@ -9,6 +9,16 @@ def is_duplicate_send_error(exc: QQOpenAPIError) -> bool:
     return exc.error_code == 40054005
 
 
+def is_pending_audit_error(exc: QQOpenAPIError) -> bool:
+    """Async-accepted codes: the message awaits manual review, not a failure.
+
+    304023 (push) / 304024 (reply) mean the platform accepted the call and
+    queued the message for human audit.
+    """
+
+    return exc.error_code in {304023, 304024}
+
+
 def log_send_duplicate_error(
     exc: QQOpenAPIError,
     *,
