@@ -141,7 +141,10 @@ Gateway start fails if `appid` / `secret` are empty, or if `receive_mode` is not
 | `webhook_path` | `BUB_QQ_WEBHOOK_PATH` | `/qq/webhook` | Webhook path |
 | `webhook_callback_timeout_seconds` | `BUB_QQ_WEBHOOK_CALLBACK_TIMEOUT_SECONDS` | `15` | Reserved for future callback controls |
 | `verify_signature` | `BUB_QQ_VERIFY_SIGNATURE` | `true` | Enforce webhook signature verification |
+| `webhook_signature_timestamp_tolerance_seconds` | `BUB_QQ_WEBHOOK_SIGNATURE_TIMESTAMP_TOLERANCE_SECONDS` | `0` | Reject webhook requests whose signature timestamp deviates from local time by more than this many seconds; `0` disables the freshness check |
 | `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | Recent inbound `msg_id` cache size |
+| `session_state_size` | `BUB_QQ_SESSION_STATE_SIZE` | `1024` | Max sessions / send records kept in memory for passive replies (oldest entries are evicted) |
+| `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | How long after an inbound message passive replies are attempted |
 | `websocket_intents` | `BUB_QQ_WEBSOCKET_INTENTS` | `1 << 25` | WebSocket identify intents (`GROUP_AND_C2C_EVENT`) |
 | `websocket_use_shard_gateway` | `BUB_QQ_WEBSOCKET_USE_SHARD_GATEWAY` | `false` | Use `/gateway/bot` recommended shard count |
 | `websocket_reconnect_delay_seconds` | `BUB_QQ_WEBSOCKET_RECONNECT_DELAY_SECONDS` | `5` | Delay before WebSocket reconnect |

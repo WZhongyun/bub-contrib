@@ -4,8 +4,8 @@ import asyncio
 
 from bub.channels.message import ChannelMessage
 
-from bub_qq.inbound.c2c import QQC2CSessionState
 from bub_qq.outbound.c2c import QQC2CSendService
+from bub_qq.session import QQSessionState
 from bub_qq.outbound.markdown import looks_like_markdown
 from bub_qq.outbound.markdown import send_with_markdown_fallback
 from bub_qq.protocol.errors import QQKnownOpenAPIError
@@ -244,13 +244,10 @@ def test_send_with_markdown_fallback_does_not_retry_rate_limit() -> None:
 
 def test_c2c_send_service_sends_markdown_for_formatted_content() -> None:
     async def _run() -> None:
-        state = QQC2CSessionState(
-            latest_message_id_by_session={"qq:c2c:user-openid": "message-1"},
-            latest_sequence_by_session_and_msg_id={},
-            latest_timestamp_by_session={
-                "qq:c2c:user-openid": "2099-01-01T00:00:00+00:00"
-            },
-            send_record_by_session_msg_id_and_seq={},
+        state = QQSessionState()
+        state.latest_message_id_by_session["qq:c2c:user-openid"] = "message-1"
+        state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
+            "2099-01-01T00:00:00+00:00"
         )
         openapi = OpenAPIStub()
         service = QQC2CSendService(
@@ -285,13 +282,10 @@ def test_c2c_send_service_sends_markdown_for_formatted_content() -> None:
 
 def test_c2c_send_service_falls_back_to_text_when_markdown_rejected() -> None:
     async def _run() -> None:
-        state = QQC2CSessionState(
-            latest_message_id_by_session={"qq:c2c:user-openid": "message-1"},
-            latest_sequence_by_session_and_msg_id={},
-            latest_timestamp_by_session={
-                "qq:c2c:user-openid": "2099-01-01T00:00:00+00:00"
-            },
-            send_record_by_session_msg_id_and_seq={},
+        state = QQSessionState()
+        state.latest_message_id_by_session["qq:c2c:user-openid"] = "message-1"
+        state.latest_timestamp_by_session["qq:c2c:user-openid"] = (
+            "2099-01-01T00:00:00+00:00"
         )
         openapi = MarkdownFallbackOpenAPIStub(
             QQOpenAPIError(

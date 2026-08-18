@@ -141,7 +141,10 @@ QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 
 | `webhook_path` | `BUB_QQ_WEBHOOK_PATH` | `/qq/webhook` | webhook 路径 |
 | `webhook_callback_timeout_seconds` | `BUB_QQ_WEBHOOK_CALLBACK_TIMEOUT_SECONDS` | `15` | 预留给后续回调控制 |
 | `verify_signature` | `BUB_QQ_VERIFY_SIGNATURE` | `true` | 是否校验 webhook 签名 |
+| `webhook_signature_timestamp_tolerance_seconds` | `BUB_QQ_WEBHOOK_SIGNATURE_TIMESTAMP_TOLERANCE_SECONDS` | `0` | webhook 签名时间戳与本地时间的最大允许偏差（秒），`0` 表示不做时效校验 |
 | `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | 近期入站 `msg_id` 去重缓存大小 |
+| `session_state_size` | `BUB_QQ_SESSION_STATE_SIZE` | `1024` | 被动回复会话状态与发送记录的内存条数上限（超出后淘汰最旧条目） |
+| `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | 入站消息之后尝试被动回复的时间窗口（秒） |
 | `websocket_intents` | `BUB_QQ_WEBSOCKET_INTENTS` | `1 << 25` | WebSocket identify intents（`GROUP_AND_C2C_EVENT`） |
 | `websocket_use_shard_gateway` | `BUB_QQ_WEBSOCKET_USE_SHARD_GATEWAY` | `false` | 是否按 `/gateway/bot` 建议分片数连接 |
 | `websocket_reconnect_delay_seconds` | `BUB_QQ_WEBSOCKET_RECONNECT_DELAY_SECONDS` | `5` | WebSocket 断线后重连延迟 |

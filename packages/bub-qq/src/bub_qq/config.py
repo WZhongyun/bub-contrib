@@ -30,7 +30,25 @@ class QQConfig(bub.Settings):
     webhook_path: str = "/qq/webhook"
     webhook_callback_timeout_seconds: float = 15.0
     verify_signature: bool = True
+    webhook_signature_timestamp_tolerance_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        description=(
+            "Reject webhook requests whose signature timestamp deviates from local"
+            " time by more than this many seconds. 0 disables the freshness check."
+        ),
+    )
     inbound_dedupe_size: int = Field(default=1024, ge=1)
+    session_state_size: int = Field(
+        default=1024,
+        ge=1,
+        description="Max sessions/send records kept in memory for passive replies.",
+    )
+    passive_reply_window_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+        description="How long after an inbound message passive replies are attempted.",
+    )
     websocket_intents: int = 1 << 25
     websocket_use_shard_gateway: bool = False
     websocket_reconnect_delay_seconds: float = 5.0

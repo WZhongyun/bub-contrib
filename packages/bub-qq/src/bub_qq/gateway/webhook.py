@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from collections.abc import Callable, Coroutine
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -165,12 +166,33 @@ class QQWebhookServer:
         if not signature or not timestamp:
             logger.warning("qq.webhook.signature_missing")
             return False
+        if not self._is_signature_timestamp_fresh(timestamp):
+            return False
         return verify_request_signature(
             secret=self._config.secret,
             timestamp=timestamp,
             body=body,
             signature_hex=signature,
         )
+
+    def _is_signature_timestamp_fresh(self, timestamp: str) -> bool:
+        tolerance = self._config.webhook_signature_timestamp_tolerance_seconds
+        if tolerance <= 0:
+            return True
+        try:
+            signed_at = float(timestamp)
+        except ValueError:
+            logger.warning("qq.webhook.signature_timestamp_invalid value={}", timestamp)
+            return False
+        skew = abs(time.time() - signed_at)
+        if skew > tolerance:
+            logger.warning(
+                "qq.webhook.signature_timestamp_stale skew_seconds={} tolerance={}",
+                round(skew, 1),
+                tolerance,
+            )
+            return False
+        return True
 
     def _schedule_payload(self, payload: dict[str, Any]) -> None:
         if self._loop is None:

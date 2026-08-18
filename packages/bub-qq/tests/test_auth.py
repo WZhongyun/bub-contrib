@@ -277,7 +277,9 @@ def test_openapi_posts_c2c_markdown_message() -> None:
         async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
             captured["path"] = request.url
             captured["json"] = request.json
-            return FakeResponse(status=200, payload={"id": "reply-md", "timestamp": 123})
+            return FakeResponse(
+                status=200, payload={"id": "reply-md", "timestamp": 123}
+            )
 
         async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
             del url, kwargs
@@ -322,7 +324,9 @@ def test_openapi_posts_group_markdown_message() -> None:
         async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
             captured["path"] = request.url
             captured["json"] = request.json
-            return FakeResponse(status=200, payload={"id": "reply-gmd", "timestamp": 123})
+            return FakeResponse(
+                status=200, payload={"id": "reply-gmd", "timestamp": 123}
+            )
 
         async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
             del url, kwargs
