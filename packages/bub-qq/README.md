@@ -230,6 +230,7 @@ Inbound non-command messages are encoded as a JSON string, including fields like
 - `sender_name` / `sender_role` / `group_openid` / `chat_type` / `was_mentioned` (group)
 - `date`
 - `attachments` (when present)
+- `quoted_messages` (when present: quoted message / merged-forward chat record content from `msg_elements`, with `message`, optional `sender_name`, and nested `messages`)
 
 Normal replies should return final text and let Bub outbound routing call `QQChannel.send`. Do not call `qq_send.py` or invent `msg_seq` for ordinary C2C replies.
 

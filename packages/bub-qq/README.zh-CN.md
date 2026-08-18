@@ -230,6 +230,7 @@ C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21
 - `sender_name` / `sender_role` / `group_openid` / `chat_type` / `was_mentioned`（群聊）
 - `date`
 - `attachments`（如有）
+- `quoted_messages`（如有：来自 `msg_elements` 的引用消息 / 合并转发聊天记录，含 `message`、可选 `sender_name` 与嵌套 `messages`）
 
 普通回复应直接返回最终文本，由 Bub outbound 路由调用 `QQChannel.send`。日常 C2C 回复不要调用 `qq_send.py`，也不要自行构造 `msg_seq`。
 
