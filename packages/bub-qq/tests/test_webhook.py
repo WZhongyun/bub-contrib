@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from bub_qq.config import QQConfig
-from bub_qq.webhook import QQWebhookServer
+from bub_qq.gateway.webhook import QQWebhookServer
 
 
 def test_schedule_payload_runs_callback_on_loop() -> None:
@@ -60,3 +61,25 @@ def test_log_callback_result_swallows_handler_errors() -> None:
 
 async def _noop(payload: dict[str, object]) -> None:
     del payload
+
+
+def test_signature_timestamp_freshness_disabled_by_default() -> None:
+    server = QQWebhookServer(
+        QQConfig(secret="secret", receive_mode="webhook"),
+        _noop,
+    )
+
+    assert server._is_signature_timestamp_fresh("0") is True
+
+
+def test_signature_timestamp_freshness_rejects_stale_and_invalid() -> None:
+    config = QQConfig(
+        secret="secret",
+        receive_mode="webhook",
+        webhook_signature_timestamp_tolerance_seconds=300.0,
+    )
+    server = QQWebhookServer(config, _noop)
+
+    assert server._is_signature_timestamp_fresh(str(time.time())) is True
+    assert server._is_signature_timestamp_fresh("0") is False
+    assert server._is_signature_timestamp_fresh("not-a-number") is False

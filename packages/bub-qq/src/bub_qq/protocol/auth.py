@@ -8,7 +8,7 @@ from typing import Protocol
 
 import aiohttp
 
-from .config import QQConfig
+from ..config import QQConfig
 
 
 @dataclass(frozen=True)
