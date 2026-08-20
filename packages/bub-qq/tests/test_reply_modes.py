@@ -4,6 +4,9 @@ import asyncio
 
 import bub
 from bub.channels.message import ChannelMessage
+from bub.hooks.interception import LlmCallResult
+from bub.hooks.interception import ToolCall
+from bub.hooks.interception import ToolCallResult
 from bub.tools import ToolContext
 
 from bub_qq import plugin
@@ -269,6 +272,45 @@ def test_denied_tool_reason_matches_model_facing_aliases() -> None:
         )
         is not None
     )
+
+
+def test_turn_declined_reply_detection() -> None:
+    final_without_tools = LlmCallResult(run_id="r1")
+    step_with_tools = LlmCallResult(
+        run_id="r1",
+        tool_calls=[{"function": {"name": "qq_send", "arguments": "{}"}}],
+    )
+    failed = LlmCallResult(run_id="r1", error=RuntimeError("boom"))
+
+    assert plugin._turn_declined_reply({}, final_without_tools) is True
+    assert plugin._turn_declined_reply({}, step_with_tools) is False
+    assert plugin._turn_declined_reply({}, failed) is False
+    assert (
+        plugin._turn_declined_reply({"replied_via_tool": True}, final_without_tools)
+        is False
+    )
+
+
+def test_after_tool_call_marks_reply_tool_usage() -> None:
+    state = {"qq": {"scope": "group", "session_id": "qq:group:g", "sender_id": "u"}}
+    call = ToolCall(run_id="r1", tool="qq_send", arguments={"content": "hi"})
+    result = ToolCallResult(
+        run_id="r1", tool="qq_send", arguments={"content": "hi"}, result="Sent."
+    )
+
+    plugin.after_tool_call(call, result, state)
+
+    assert state["qq"]["replied_via_tool"] is True
+
+
+def test_after_tool_call_ignores_other_tools_for_reply_flag() -> None:
+    state = {"qq": {"scope": "group", "session_id": "qq:group:g", "sender_id": "u"}}
+    call = ToolCall(run_id="r1", tool="tape.info", arguments={})
+    result = ToolCallResult(run_id="r1", tool="tape.info", arguments={}, result="ok")
+
+    plugin.after_tool_call(call, result, state)
+
+    assert "replied_via_tool" not in state["qq"]
 
 
 class FakeChannel:

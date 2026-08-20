@@ -19,6 +19,7 @@ from . import tools as _tools  # noqa: F401  (registers the qq.send tool)
 from .config import QQConfig
 from .security import QQ_CONTEXT_KEY
 from .security import QQ_STATE_KEY
+from .security import REPLY_TOOL_NAME
 from .security import SlidingWindowRateLimiter
 from .security import evaluate_tool_call
 
@@ -53,6 +54,26 @@ def _qq_state(state: TurnState) -> dict[str, Any] | None:
         return None
     qq_state = state.get(QQ_STATE_KEY)
     return qq_state if isinstance(qq_state, dict) else None
+
+
+def _is_reply_tool(tool: str) -> bool:
+    """Match qq.send by either its registry name or the model-facing alias."""
+
+    return tool == REPLY_TOOL_NAME or tool.replace("_", ".") == REPLY_TOOL_NAME
+
+
+def _turn_declined_reply(qq_state: dict[str, Any], result: LlmCallResult) -> bool:
+    """Whether this LLM result ends the turn with the model declining to reply.
+
+    In tool reply mode the agent loop stops at the first LLM response
+    without tool calls. If no qq.send call was recorded earlier in the
+    turn (``replied_via_tool``), that final response means the model chose
+    silence — the only turn outcome that otherwise leaves no log trace.
+    """
+
+    if result.error is not None or result.tool_calls:
+        return False
+    return not qq_state.get("replied_via_tool")
 
 
 def _get_rate_limiter(config: QQConfig) -> SlidingWindowRateLimiter | None:
@@ -172,6 +193,13 @@ def after_llm_call(
         result.duration_ms,
         type(result.error).__name__ if result.error is not None else "",
     )
+    config = bub.ensure_config(QQConfig)
+    if config.reply_mode == "tool" and _turn_declined_reply(qq_state, result):
+        logger.info(
+            "qq.reply declined session_id={} sender_id={} reason=no_send_tool_call",
+            qq_state.get("session_id"),
+            qq_state.get("sender_id"),
+        )
 
 
 @hookimpl
@@ -181,6 +209,10 @@ def after_tool_call(
     qq_state = _qq_state(state)
     if qq_state is None:
         return
+    if _is_reply_tool(call.tool):
+        # Any qq.send attempt means the model did not decline this turn;
+        # after_llm_call uses this to log genuine silence.
+        qq_state["replied_via_tool"] = True
     logger.info(
         "qq.audit.tool session_id={} sender_id={} role={} tool={} duration_ms={} error={}",
         qq_state.get("session_id"),
