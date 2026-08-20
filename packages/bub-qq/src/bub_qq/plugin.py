@@ -15,6 +15,7 @@ from bub.hooks.interception import ToolCallResult
 from bub.turn import TurnState
 from loguru import logger
 
+from . import tools as _tools  # noqa: F401  (registers the qq.send tool)
 from .config import QQConfig
 from .security import QQ_CONTEXT_KEY
 from .security import QQ_STATE_KEY
@@ -23,6 +24,26 @@ from .security import evaluate_tool_call
 
 CHANNEL_NAME = "qq"
 RECEIVE_MODES = ["webhook", "websocket"]
+
+# Bub's builtin <response_instruct> assumes skill-based channels ("your
+# plain reply will be ignored"). QQ works differently in each reply mode,
+# so spell the actual contract out; the response criteria referenced below
+# are the numbered conditions in that builtin block.
+DIRECT_REPLY_PROMPT = """\
+<qq_response_instruct>
+This conversation is on the QQ channel ($qq), which overrides the generic channel guidance above:
+- There is no QQ send skill or tool to call. Your plain final reply text IS delivered to the QQ chat as-is.
+- To reply, write the reply text and end the turn.
+- If no response is needed (apply the response criteria above), output exactly <no_reply/> and nothing else; the channel swallows it and nothing is sent.
+</qq_response_instruct>"""
+
+TOOL_REPLY_PROMPT = """\
+<qq_response_instruct>
+This conversation is on the QQ channel ($qq), which overrides the generic channel guidance above:
+- To reply, call the qq.send tool with the message text. Reply targeting (msg_id/msg_seq) is handled internally; never construct protocol fields yourself.
+- Your plain final reply text is NOT delivered to the chat.
+- If no response is needed (apply the response criteria above), do not call qq.send.
+</qq_response_instruct>"""
 
 _rate_limiter: SlidingWindowRateLimiter | None = None
 
@@ -79,6 +100,20 @@ def load_state(message: Any, session_id: str) -> TurnState | None:
     if not isinstance(qq_context, dict):
         return None
     return {QQ_STATE_KEY: {**qq_context, "session_id": session_id}}
+
+
+@hookimpl
+def system_prompt(prompt: Any, state: TurnState) -> str | None:
+    """Describe the QQ reply contract for the active reply mode."""
+
+    del prompt
+    qq_state = _qq_state(state)
+    if qq_state is None:
+        return None
+    config = bub.ensure_config(QQConfig)
+    if config.reply_mode == "tool":
+        return TOOL_REPLY_PROMPT
+    return DIRECT_REPLY_PROMPT
 
 
 @hookimpl
