@@ -188,7 +188,7 @@ export BUB_QQ_RECEIVE_MODE=websocket
 
 ## 回复模式
 
-`reply_mode` 决定模型输出如何变成 QQ 消息，以及同样重要的——模型如何保持沉默（例如群聊中未被 @ 且无话可说时）。两种模式共享同一条发送链路（被动 `msg_id`/`msg_seq` 定位、去重、markdown 回退、主动消息兜底），并会按模式向 system prompt 注入一段 `<qq_response_instruct>`，让模型明确当前契约。
+`reply_mode` 决定模型输出如何变成 QQ 消息，以及同样重要的——模型如何保持沉默（例如群聊中未被 @ 且无话可说时）。用 opt-in/opt-out 的语言说：`direct` 是 **opt-out**（默认回复，模型输出哨兵显式退出本轮）；`tool` 是 **opt-in**（默认沉默，模型调用发送工具显式选择回复——与 Bub 其他通道的契约一致）。两种模式共享同一条发送链路（被动 `msg_id`/`msg_seq` 定位、去重、markdown 回退、主动消息兜底），并会按模式向 system prompt 注入一段 `<qq_response_instruct>`，让模型明确当前契约。
 
 ### `direct`（默认）
 

@@ -188,7 +188,7 @@ Settings path in the latest mobile QQ client: **open the group chat → tap "Mor
 
 ## Reply modes
 
-`reply_mode` decides how model output becomes a QQ message, and — just as important — how the model stays silent (e.g. for un-mentioned group chatter it has nothing to add to). Both modes share the same send pipeline (passive `msg_id`/`msg_seq` targeting, dedupe, markdown fallback, active-message fallback), and a per-mode `<qq_response_instruct>` block is injected into the system prompt so the model knows the active contract.
+`reply_mode` decides how model output becomes a QQ message, and — just as important — how the model stays silent (e.g. for un-mentioned group chatter it has nothing to add to). In opt-in/opt-out terms: `direct` is **opt-out** (replying is the default; the model explicitly opts out with a sentinel), while `tool` is **opt-in** (silence is the default; the model explicitly opts in by calling the send tool — the same contract Bub's other channels use). Both modes share the same send pipeline (passive `msg_id`/`msg_seq` targeting, dedupe, markdown fallback, active-message fallback), and a per-mode `<qq_response_instruct>` block is injected into the system prompt so the model knows the active contract.
 
 ### `direct` (default)
 
