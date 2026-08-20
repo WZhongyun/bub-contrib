@@ -1,7 +1,7 @@
 [project]
 name = "bub-dsh"
 version = "0.1.0"
-description = "DeepSeek Harness SDK-backed run_model plugin for Bub"
+description = "DeepSeek Harness SDK-backed streaming model plugin for Bub"
 readme = "README.md"
 authors = [
     { name = "Frost Ming", email = "me@frostming.com" }

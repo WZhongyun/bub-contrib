@@ -4,18 +4,21 @@ import atexit
 import asyncio
 import threading
 import uuid
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import bub
 from bub import hookimpl
 from bub.builtin.settings import AgentSettings
+from bub.streaming import AsyncStreamEvents, StreamEvent
 from bub.turn import TurnState
-from deepseek_harness import DeepSeekHarness, RunResult
+from deepseek_harness import DeepSeekHarness, Notification, RunResult
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
 ROOT_PROVIDER = "dsh"
 DEFAULT_HARNESS_PROVIDER = "deepseek-official"
+_STREAM_DONE = object()
 
 
 class _HarnessRuntime:
@@ -143,16 +146,59 @@ def _run_with_dsh(
     *,
     session_id: str,
     workspace: Path,
-) -> str:
+    on_stream_event: Callable[[StreamEvent], None],
+) -> None:
     runtime = _runtime_for(workspace)
+    harness_session_id = runtime.session_id(session_id)
+    text_emitted = False
+
+    def on_notification(notification: Notification) -> None:
+        nonlocal text_emitted
+        event = _stream_event_from_notification(notification, harness_session_id)
+        if event is None:
+            return
+        if event.kind == "text":
+            text_emitted = True
+        on_stream_event(event)
+
     with runtime.lock:
         result: RunResult = runtime.harness.run(
             prompt,
-            session_id=runtime.session_id(session_id),
+            session_id=harness_session_id,
+            on_notification=on_notification,
         )
     if result.finish_reason == "error":
         raise DshRunError(_run_result_error(result))
-    return result.final_response
+    if not text_emitted and result.final_response:
+        on_stream_event(StreamEvent("text", {"delta": result.final_response}))
+
+
+def _stream_event_from_notification(
+    notification: Notification,
+    session_id: str,
+) -> StreamEvent | None:
+    if notification.method != "session.event":
+        return None
+    if notification.payload.get("sessionId") != session_id:
+        return None
+    event = notification.payload.get("event")
+    if not isinstance(event, dict) or event.get("type") != "assistant/chunk":
+        return None
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    chunk = data.get("chunk")
+    if not isinstance(chunk, dict):
+        return None
+    chunk_type = chunk.get("type")
+    text = chunk.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    if chunk_type == "text-delta":
+        return StreamEvent("text", {"delta": text})
+    if chunk_type == "reasoning-delta":
+        return StreamEvent("reasoning", {"delta": text})
+    return None
 
 
 def _run_result_error(result: RunResult) -> dict[str, object] | None:
@@ -171,14 +217,66 @@ def _run_result_error(result: RunResult) -> dict[str, object] | None:
     return None
 
 
+async def _stream_with_dsh(
+    prompt: str | list[dict],
+    *,
+    session_id: str,
+    workspace: Path,
+) -> AsyncIterator[StreamEvent]:
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[StreamEvent | Exception | object] = asyncio.Queue()
+    accepting_events = threading.Event()
+    accepting_events.set()
+
+    def enqueue(item: StreamEvent | Exception | object) -> None:
+        if not accepting_events.is_set():
+            return
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except RuntimeError:
+            pass
+
+    def run() -> None:
+        try:
+            _run_with_dsh(
+                prompt,
+                session_id=session_id,
+                workspace=workspace,
+                on_stream_event=enqueue,
+            )
+        except Exception as error:
+            enqueue(error)
+        finally:
+            enqueue(_STREAM_DONE)
+
+    worker = asyncio.create_task(asyncio.to_thread(run))
+    try:
+        while True:
+            item = await queue.get()
+            if item is _STREAM_DONE:
+                await worker
+                return
+            if isinstance(item, Exception):
+                raise item
+            if isinstance(item, StreamEvent):
+                yield item
+    finally:
+        accepting_events.clear()
+
+
 @hookimpl
-async def run_model(prompt: str | list[dict], session_id: str, state: TurnState) -> str:
-    return await asyncio.to_thread(
-        _run_with_dsh,
-        prompt,
-        session_id=session_id,
-        workspace=workspace_from_state(state),
+async def run_model_stream(
+    prompt: str | list[dict],
+    session_id: str,
+    state: TurnState,
+) -> AsyncStreamEvents:
+    return AsyncStreamEvents(
+        _stream_with_dsh(
+            prompt,
+            session_id=session_id,
+            workspace=workspace_from_state(state),
+        )
     )
 
 
-__all__ = ["DshRunError", "DshSettings", "run_model"]
+__all__ = ["DshRunError", "DshSettings", "run_model_stream"]

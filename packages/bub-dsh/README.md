@@ -1,11 +1,11 @@
 # bub-dsh
 
-DeepSeek Harness Python SDK-backed `run_model` plugin for `bub`.
+DeepSeek Harness Python SDK-backed streaming model plugin for `bub`.
 
 ## What It Provides
 
 - Bub plugin entry point: `dsh`
-- A `run_model` hook backed by the official `deepseek-harness-sdk`
+- A `run_model_stream` hook backed by the official `deepseek-harness-sdk`
 - Runtime-local DeepSeek Harness session mapping for each Bub `session_id`
 
 ## Installation
@@ -52,7 +52,9 @@ Environment variables use the `BUB_DSH_` prefix:
 ## Runtime Behavior
 
 The DeepSeek Harness SDK is synchronous, so the plugin runs it in a worker thread and
-does not block Bub's async event loop. Runtime processes are reused until Bub exits.
+bridges `assistant/chunk` text and reasoning deltas into Bub's async event stream without
+blocking Bub's event loop. If a completed run emitted no text delta, the plugin falls
+back to the run's final response. Runtime processes are reused until Bub exits.
 Calls for the same Bub session reuse one runtime-local session id, preserving the
 Harness conversation and persistent shell state without colliding with logs left by a
 previous Bub process. This history is retained only for the lifetime of the current Bub

@@ -30,7 +30,24 @@ class FakeRootSettings:
         self.max_tokens = max_tokens
 
 
-def test_run_model_uses_dsh_sdk(
+async def collect_stream(
+    prompt: str | list[dict],
+    session_id: str,
+    state: dict,
+):
+    stream = await plugin.run_model_stream(prompt, session_id, state)
+    return [event async for event in stream]
+
+
+def run_stream(
+    prompt: str | list[dict],
+    session_id: str = "session-1",
+    state: dict | None = None,
+):
+    return asyncio.run(collect_stream(prompt, session_id, state or {}))
+
+
+def test_run_model_stream_uses_dsh_sdk(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -43,8 +60,44 @@ def test_run_model_uses_dsh_sdk(
         def close(self) -> None:
             calls["closed"] = True
 
-        def run(self, prompt: str | list[dict], *, session_id: str):
+        def run(self, prompt, *, session_id: str, on_notification):
             calls["run"] = {"prompt": prompt, "session_id": session_id}
+            on_notification(
+                plugin.Notification(
+                    method="session.event",
+                    payload={
+                        "sessionId": session_id,
+                        "event": {
+                            "type": "assistant/chunk",
+                            "data": {
+                                "chunk": {
+                                    "type": "text-delta",
+                                    "index": 0,
+                                    "text": "assistant-",
+                                }
+                            },
+                        },
+                    },
+                )
+            )
+            on_notification(
+                plugin.Notification(
+                    method="session.event",
+                    payload={
+                        "sessionId": session_id,
+                        "event": {
+                            "type": "assistant/chunk",
+                            "data": {
+                                "chunk": {
+                                    "type": "text-delta",
+                                    "index": 0,
+                                    "text": "output",
+                                }
+                            },
+                        },
+                    },
+                )
+            )
             return type(
                 "Result",
                 (),
@@ -77,15 +130,16 @@ def test_run_model_uses_dsh_sdk(
         ),
     )
 
-    result = asyncio.run(
-        plugin.run_model(
-            [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}],
-            "telegram:42",
-            {"_runtime_workspace": str(tmp_path)},
-        )
+    events = run_stream(
+        [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}],
+        "telegram:42",
+        {"_runtime_workspace": str(tmp_path)},
     )
 
-    assert result == "assistant-output"
+    assert [(event.kind, event.data) for event in events] == [
+        ("text", {"delta": "assistant-"}),
+        ("text", {"delta": "output"}),
+    ]
     run_call = calls["run"]
     assert isinstance(run_call, dict)
     assert run_call["prompt"] == [
@@ -107,7 +161,7 @@ def test_run_model_uses_dsh_sdk(
     }
 
 
-def test_run_model_forwards_structured_prompt_unchanged(
+def test_run_model_stream_forwards_structured_prompt_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt = [
@@ -117,25 +171,29 @@ def test_run_model_forwards_structured_prompt_unchanged(
     captured: dict[str, object] = {}
 
     def fake_run_with_dsh(
-        value: str | list[dict], *, session_id: str, workspace: Path
-    ) -> str:
+        value: str | list[dict],
+        *,
+        session_id: str,
+        workspace: Path,
+        on_stream_event,
+    ) -> None:
         captured.update(
             prompt=value,
             session_id=session_id,
             workspace=workspace,
         )
-        return "assistant-output"
+        on_stream_event(plugin.StreamEvent("text", {"delta": "assistant-output"}))
 
     monkeypatch.setattr(plugin, "_run_with_dsh", fake_run_with_dsh)
 
-    result = asyncio.run(plugin.run_model(prompt, "session-1", {}))
+    events = run_stream(prompt)
 
-    assert result == "assistant-output"
+    assert [event.data["delta"] for event in events] == ["assistant-output"]
     assert captured["prompt"] is prompt
     assert captured["session_id"] == "session-1"
 
 
-def test_run_model_exposes_harness_error(
+def test_run_model_stream_exposes_harness_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -155,7 +213,7 @@ def test_run_model_exposes_harness_error(
         def close(self) -> None:
             pass
 
-        def run(self, prompt: str | list[dict], *, session_id: str):
+        def run(self, prompt, *, session_id: str, on_notification):
             self.session_ids.append(session_id)
             return type(
                 "Result",
@@ -190,13 +248,13 @@ def test_run_model_exposes_harness_error(
     )
 
     with pytest.raises(plugin.DshRunError) as exc_info:
-        asyncio.run(plugin.run_model("hello", "session-error", {}))
+        run_stream("hello", "session-error")
 
     assert exc_info.value.error == harness_error
     assert str(exc_info.value) == "DeepSeek Harness run failed: model failed [UNKNOWN]"
 
 
-def test_run_model_reuses_runtime_and_internal_session_id(
+def test_run_model_stream_reuses_runtime_and_internal_session_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -211,7 +269,7 @@ def test_run_model_reuses_runtime_and_internal_session_id(
         def close(self) -> None:
             pass
 
-        def run(self, prompt: str | list[dict], *, session_id: str):
+        def run(self, prompt, *, session_id: str, on_notification):
             calls.append(session_id)
             return type(
                 "Result",
@@ -234,8 +292,8 @@ def test_run_model_reuses_runtime_and_internal_session_id(
         ),
     )
 
-    asyncio.run(plugin.run_model("first", "cli_session", {}))
-    asyncio.run(plugin.run_model("second", "cli_session", {}))
+    run_stream("first", "cli_session")
+    run_stream("second", "cli_session")
 
     assert instances == 1
     assert len(calls) == 2
@@ -243,23 +301,112 @@ def test_run_model_reuses_runtime_and_internal_session_id(
     assert calls[0].startswith("bub-")
 
 
-def test_run_model_forwards_internal_command_like_prompt(
+def test_run_model_stream_forwards_internal_command_like_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
 
     def fake_run_with_dsh(
-        value: str | list[dict], *, session_id: str, workspace: Path
-    ) -> str:
+        value: str | list[dict],
+        *,
+        session_id: str,
+        workspace: Path,
+        on_stream_event,
+    ) -> None:
         captured["prompt"] = value
-        return "assistant-output"
+        on_stream_event(plugin.StreamEvent("text", {"delta": "assistant-output"}))
 
     monkeypatch.setattr(plugin, "_run_with_dsh", fake_run_with_dsh)
 
-    result = asyncio.run(plugin.run_model(",help", "session-1", {}))
+    events = run_stream(",help")
 
-    assert result == "assistant-output"
+    assert [event.data["delta"] for event in events] == ["assistant-output"]
     assert captured["prompt"] == ",help"
+
+
+def test_stream_event_from_notification_filters_and_maps_chunks() -> None:
+    def notification(
+        chunk: dict[str, object], *, session_id: str = "harness-session"
+    ) -> plugin.Notification:
+        return plugin.Notification(
+            method="session.event",
+            payload={
+                "sessionId": session_id,
+                "event": {
+                    "type": "assistant/chunk",
+                    "data": {"chunk": chunk},
+                },
+            },
+        )
+
+    text_event = plugin._stream_event_from_notification(
+        notification({"type": "text-delta", "text": "answer"}),
+        "harness-session",
+    )
+    reasoning_event = plugin._stream_event_from_notification(
+        notification({"type": "reasoning-delta", "text": "thinking"}),
+        "harness-session",
+    )
+
+    assert text_event == plugin.StreamEvent("text", {"delta": "answer"})
+    assert reasoning_event == plugin.StreamEvent(
+        "reasoning", {"delta": "thinking"}
+    )
+    assert (
+        plugin._stream_event_from_notification(
+            notification(
+                {"type": "text-delta", "text": "subagent"},
+                session_id="other-session",
+            ),
+            "harness-session",
+        )
+        is None
+    )
+    assert (
+        plugin._stream_event_from_notification(
+            notification({"type": "tool-call-delta", "argumentsDelta": "{}"}),
+            "harness-session",
+        )
+        is None
+    )
+
+
+def test_run_model_stream_falls_back_to_final_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeHarness:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def run(self, prompt, *, session_id: str, on_notification):
+            return type(
+                "Result",
+                (),
+                {
+                    "final_response": "fallback-output",
+                    "finish_reason": "completed",
+                    "events": [],
+                },
+            )()
+
+    monkeypatch.setattr(plugin, "DeepSeekHarness", FakeHarness)
+    dsh_settings = plugin.DshSettings(session_root=tmp_path / "sessions")
+    root_settings = FakeRootSettings()
+    monkeypatch.setattr(
+        plugin.bub,
+        "ensure_config",
+        lambda settings_type: (
+            dsh_settings if settings_type is plugin.DshSettings else root_settings
+        ),
+    )
+
+    events = run_stream("hello")
+
+    assert events == [plugin.StreamEvent("text", {"delta": "fallback-output"})]
 
 
 def test_harness_kwargs_omits_optional_settings(
