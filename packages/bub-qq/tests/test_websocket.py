@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 
 from bub_qq.config import QQConfig
-from bub_qq.websocket import QQWebSocketClient
-from bub_qq.websocket import _ShardSpec
-from bub_qq.websocket import _ShardState
+from bub_qq.gateway.websocket import QQWebSocketClient
+from bub_qq.gateway.websocket import _ShardSpec
+from bub_qq.gateway.websocket import _ShardState
 
 
 class OpenAPIStub:

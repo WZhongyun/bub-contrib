@@ -14,16 +14,16 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
-from .auth import QQAuthError
-from .config import QQConfig
-from .gateway import QQGatewayInfo
-from .gateway import get_gateway
-from .gateway import get_shard_gateway
-from .gateway import heartbeat_payload
-from .gateway import identify_payload
-from .gateway import resume_payload
-from .openapi import QQOpenAPI
-from .openapi_errors import QQOpenAPIError
+from ..config import QQConfig
+from ..protocol.auth import QQAuthError
+from ..protocol.errors import QQOpenAPIError
+from ..protocol.openapi import QQOpenAPI
+from .info import QQGatewayInfo
+from .info import get_gateway
+from .info import get_shard_gateway
+from .info import heartbeat_payload
+from .info import identify_payload
+from .info import resume_payload
 from .ws_errors import QQWebSocketFatalError
 from .ws_errors import raise_for_close_code
 

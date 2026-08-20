@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from bub_qq.signature import _seed_from_secret
-from bub_qq.signature import sign_validation_payload
-from bub_qq.signature import verify_request_signature
+from bub_qq.protocol.signature import _seed_from_secret
+from bub_qq.protocol.signature import sign_validation_payload
+from bub_qq.protocol.signature import verify_request_signature
 
 
 def test_validation_signature_matches_official_example() -> None:

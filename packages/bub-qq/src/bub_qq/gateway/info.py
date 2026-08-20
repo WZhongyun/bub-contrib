@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .openapi import QQOpenAPI
+from ..protocol.openapi import QQOpenAPI
 
 
 @dataclass(frozen=True)

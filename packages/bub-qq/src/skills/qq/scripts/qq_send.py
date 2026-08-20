@@ -6,9 +6,9 @@ import asyncio
 
 import typer
 
-from bub_qq.auth import QQTokenProvider
 from bub_qq.config import QQConfig
-from bub_qq.openapi import QQOpenAPI
+from bub_qq.protocol.auth import QQTokenProvider
+from bub_qq.protocol.openapi import QQOpenAPI
 
 
 app = typer.Typer(add_completion=False)

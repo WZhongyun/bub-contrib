@@ -6,11 +6,11 @@ from typing import Protocol
 
 import aiohttp
 
+from ..config import QQConfig
 from .auth import QQTokenProvider
-from .config import QQConfig
-from .openapi_errors import build_openapi_error
-from .openapi_errors import QQOpenAPIError
-from .openapi_errors import trace_id_from_response
+from .errors import QQOpenAPIError
+from .errors import build_openapi_error
+from .errors import trace_id_from_response
 
 
 class ResponseLike(Protocol):
@@ -162,14 +162,125 @@ class QQOpenAPI:
         msg_id: str,
         msg_seq: int,
     ) -> dict[str, Any]:
+        return await self._post_text_message(
+            path=f"/v2/users/{openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def post_c2c_markdown_message(
+        self,
+        *,
+        openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self._post_markdown_message(
+            path=f"/v2/users/{openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def post_group_text_message(
+        self,
+        *,
+        group_openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self._post_text_message(
+            path=f"/v2/groups/{group_openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def post_group_markdown_message(
+        self,
+        *,
+        group_openid: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self._post_markdown_message(
+            path=f"/v2/groups/{group_openid}/messages",
+            content=content,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+        )
+
+    async def post_group_active_text_message(
+        self,
+        *,
+        group_openid: str,
+        content: str,
+    ) -> dict[str, Any]:
+        """Send a proactive group message (no ``msg_id``/``msg_seq``).
+
+        Consumes the group's active-message quota and requires the group
+        admin to have allowed proactive messages in the QQ client.
+        """
+
         return await self.post(
-            f"/v2/users/{openid}/messages",
+            f"/v2/groups/{group_openid}/messages",
+            json_body={"content": content, "msg_type": 0},
+        )
+
+    async def _post_text_message(
+        self,
+        *,
+        path: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self.post(
+            path,
             json_body={
                 "content": content,
                 "msg_type": 0,
                 "msg_id": msg_id,
                 "msg_seq": msg_seq,
             },
+        )
+
+    async def _post_markdown_message(
+        self,
+        *,
+        path: str,
+        content: str,
+        msg_id: str,
+        msg_seq: int,
+    ) -> dict[str, Any]:
+        return await self.post(
+            path,
+            json_body={
+                "msg_type": 2,
+                "markdown": {"content": content},
+                "msg_id": msg_id,
+                "msg_seq": msg_seq,
+            },
+        )
+
+    async def put_interaction(
+        self,
+        *,
+        interaction_id: str,
+        code: int = 0,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        json_body: dict[str, Any] = {"code": code}
+        if data:
+            json_body["data"] = data
+        return await self.request(
+            "PUT",
+            f"/interactions/{interaction_id}",
+            json_body=json_body,
         )
 
 
