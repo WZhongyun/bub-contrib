@@ -295,6 +295,16 @@ async def test_initialize_advertises_session_capabilities() -> None:
     assert response.agent_capabilities.session_capabilities.close is not None
     assert response.agent_capabilities.session_capabilities.resume is not None
     assert response.agent_capabilities.load_session is True
+    assert response.agent_capabilities.field_meta == {
+        "lody": {
+            "steering": {
+                "version": 1,
+                "transport": "request",
+                "upstreamTurn": "same",
+                "configPolicy": "active",
+            }
+        }
+    }
     assert response.field_meta == {"steering": {"supported": True}}
 
 

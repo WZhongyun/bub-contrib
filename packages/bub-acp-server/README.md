@@ -74,6 +74,26 @@ Clients can detect steering support in the initialize response:
 }
 ```
 
+Clients that require acknowledged steering can also negotiate the Lody
+extension under `agentCapabilities._meta`:
+
+```json
+{
+  "agentCapabilities": {
+    "_meta": {
+      "lody": {
+        "steering": {
+          "version": 1,
+          "transport": "request",
+          "upstreamTurn": "same",
+          "configPolicy": "active"
+        }
+      }
+    }
+  }
+}
+```
+
 Send a private ACP extension request while a turn is running or after it has become idle:
 
 ```json
@@ -86,12 +106,18 @@ Send a private ACP extension request while a turn is running or after it has bec
         "type": "text",
         "text": "Stop the current approach and inspect the failing test first."
       }
-    ]
+    ],
+    "steerId": "client-generated-steer-id"
   }
 }
 ```
 
 The response outcome is `injected` when Bub consumes the message at the next model-step boundary, `startedNewTurn` when the previous turn has already passed its final boundary, or `failed` for an unexpected internal failure. Steering requests are serialized per session and preserve arrival order. The extension is private rather than part of the standard ACP method set, so clients must opt into it explicitly.
+
+`steerId` is optional for legacy clients. When present, Bub follows the
+acknowledged-steering contract: after the message is applied it sends
+`_session/steering_applied` with the same `sessionId` and `steerId`, and returns
+`injected`. This lets the client distinguish submission from application.
 
 ## Use In Zed
 

@@ -26,6 +26,12 @@ class E2EClient:
         self.write_requests: list[dict[str, object]] = []
         self.create_requests: list[dict[str, object]] = []
         self.session_updates: list[tuple[str, object]] = []
+        self.ext_notifications: list[tuple[str, dict[str, Any]]] = []
+
+    async def ext_notification(
+        self, method: str, params: dict[str, Any]
+    ) -> None:
+        self.ext_notifications.append((method, params))
 
     async def read_text_file(
         self,
@@ -214,7 +220,9 @@ async def test_acp_prompt_executes_bub_tools_through_client(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_idle_steering_starts_turn_over_extension_route(tmp_path: Path) -> None:
+async def test_acknowledged_steering_starts_turn_over_extension_route(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     target_path = workspace / "target.txt"
@@ -245,6 +253,7 @@ async def test_idle_steering_starts_turn_over_extension_route(tmp_path: Path) ->
                 {
                     "sessionId": session.session_id,
                     "prompt": [{"type": "text", "text": "exercise client tools"}],
+                    "steerId": "steer-1",
                 },
             )
             while not any(
@@ -255,7 +264,24 @@ async def test_idle_steering_starts_turn_over_extension_route(tmp_path: Path) ->
 
         assert process.returncode is None
         assert initialized.field_meta == {"steering": {"supported": True}}
-        assert response == {"outcome": "startedNewTurn"}
+        assert initialized.agent_capabilities is not None
+        assert initialized.agent_capabilities.field_meta == {
+            "lody": {
+                "steering": {
+                    "version": 1,
+                    "transport": "request",
+                    "upstreamTurn": "same",
+                    "configPolicy": "active",
+                }
+            }
+        }
+        assert response == {"outcome": "injected"}
+        assert client.ext_notifications == [
+            (
+                "session/steering_applied",
+                {"sessionId": session.session_id, "steerId": "steer-1"},
+            )
+        ]
 
     assert any(
         update.session_update == "agent_message_chunk"

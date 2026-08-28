@@ -19,12 +19,18 @@ from bub_acp_server.steering import ACPSteeringInbox
 class FakeClient:
     def __init__(self) -> None:
         self.updates: list[tuple[str, object]] = []
+        self.ext_notifications: list[tuple[str, dict[str, Any]]] = []
 
     async def session_update(
         self, session_id: str, update: object, **kwargs: Any
     ) -> None:
         del kwargs
         self.updates.append((session_id, update))
+
+    async def ext_notification(
+        self, method: str, params: dict[str, Any]
+    ) -> None:
+        self.ext_notifications.append((method, params))
 
 
 class ControlledFramework:
@@ -91,6 +97,15 @@ def steering_params(session_id: str, text: str) -> dict[str, object]:
     }
 
 
+def acknowledged_steering_params(
+    session_id: str, text: str, steer_id: str = "steer-id"
+) -> dict[str, object]:
+    return {
+        **steering_params(session_id, text),
+        "steerId": steer_id,
+    }
+
+
 @pytest.mark.asyncio
 async def test_steering_inbox_receipt_distinguishes_delivery_from_claim() -> None:
     inbox = ACPSteeringInbox()
@@ -144,6 +159,51 @@ async def test_active_turn_consumes_steering_and_reports_injected(
     await prompt_task
     assert [message.content for message in framework.consumed] == ["change course"]
     assert len(framework.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_steering_notifies_after_model_step_consumes_it(
+    tmp_path: Path,
+) -> None:
+    inbox = ACPSteeringInbox()
+    framework = ControlledFramework(inbox)
+    framework.drain_on_release.add(0)
+    client = FakeClient()
+    agent = BubACPAgent(cast(Any, framework), steering_inbox=inbox)
+    agent.on_connect(cast(Any, client))
+    session = await agent.new_session(cwd=str(tmp_path))
+
+    prompt_task = asyncio.create_task(
+        agent.prompt(
+            [{"type": "text", "text": "initial"}],
+            session_id=session.session_id,
+        )
+    )
+    assert await framework.entered.get() == 0
+    steer_task = asyncio.create_task(
+        agent.ext_method(
+            "session/steering",
+            acknowledged_steering_params(
+                session.session_id, "change course", "steer-1"
+            ),
+        )
+    )
+    await wait_for_message_count(
+        inbox, {"session_id": f"acp-server:{session.session_id}"}, 1
+    )
+    assert client.ext_notifications == []
+
+    framework.releases[0].set()
+
+    assert await steer_task == {"outcome": "injected"}
+    assert client.ext_notifications == [
+        (
+            "session/steering_applied",
+            {"sessionId": session.session_id, "steerId": "steer-1"},
+        )
+    ]
+    await prompt_task
+    assert [message.content for message in framework.consumed] == ["change course"]
 
 
 @pytest.mark.asyncio

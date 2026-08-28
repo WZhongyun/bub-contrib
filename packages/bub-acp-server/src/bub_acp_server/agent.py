@@ -104,6 +104,14 @@ _PROMPT_ADAPTER = TypeAdapter(list[ACPPromptBlock])
 logger = logging.getLogger(__name__)
 
 SESSION_STEERING_METHOD = "session/steering"
+SESSION_STEERING_APPLIED_METHOD = "session/steering_applied"
+
+_LODY_STEERING_CAPABILITY = {
+    "version": 1,
+    "transport": "request",
+    "upstreamTurn": "same",
+    "configPolicy": "active",
+}
 
 _BUB_PROMPT_CONTEXT = re.compile(
     r"^(?=[^\n]*channel=\$)(?=[^\n]*chat_id=)[^\n]+\n"
@@ -466,6 +474,9 @@ class BubACPAgent:
             field_meta={"steering": {"supported": True}},
             agent_capabilities=AgentCapabilities(
                 load_session=True,
+                field_meta={
+                    "lody": {"steering": _LODY_STEERING_CAPABILITY},
+                },
                 session_capabilities=SessionCapabilities(
                     close=SessionCloseCapabilities(),
                     list=SessionListCapabilities(),
@@ -613,8 +624,15 @@ class BubACPAgent:
             raise RequestError.method_not_found(f"_{method}")
 
         try:
-            session_id, prompt = self._parse_steering_params(params)
-            return await self._execute_or_queue_steering(session_id, prompt)
+            session_id, prompt, steer_id = self._parse_steering_params(params)
+            outcome = await self._execute_or_queue_steering(session_id, prompt)
+            if steer_id is not None:
+                await self._require_client().ext_notification(
+                    SESSION_STEERING_APPLIED_METHOD,
+                    {"sessionId": session_id, "steerId": steer_id},
+                )
+                return {"outcome": "injected"}
+            return outcome
         except RequestError:
             raise
         except Exception:
@@ -623,20 +641,25 @@ class BubACPAgent:
 
     def _parse_steering_params(
         self, params: Mapping[str, object]
-    ) -> tuple[str, list[ACPPromptBlock]]:
+    ) -> tuple[str, list[ACPPromptBlock], str | None]:
         session_id = params.get("sessionId")
         raw_prompt = params.get("prompt")
+        raw_steer_id = params.get("steerId")
         if not isinstance(session_id, str) or not session_id:
             raise RequestError.invalid_params({"field": "sessionId"})
         if not isinstance(raw_prompt, list) or not raw_prompt:
             raise RequestError.invalid_params({"field": "prompt"})
+        if raw_steer_id is not None and (
+            not isinstance(raw_steer_id, str) or not raw_steer_id
+        ):
+            raise RequestError.invalid_params({"field": "steerId"})
         try:
             prompt = _PROMPT_ADAPTER.validate_python(raw_prompt)
         except ValidationError as error:
             raise RequestError.invalid_params(
                 {"field": "prompt", "details": error.errors(include_url=False)}
             ) from error
-        return session_id, prompt
+        return session_id, prompt, raw_steer_id
 
     async def _execute_or_queue_steering(
         self, session_id: str, prompt: list[ACPPromptBlock]
