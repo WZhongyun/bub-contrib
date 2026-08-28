@@ -103,8 +103,15 @@ _PROMPT_ADAPTER = TypeAdapter(list[ACPPromptBlock])
 
 logger = logging.getLogger(__name__)
 
-SESSION_STEERING_METHOD = "session/steering"
-SESSION_STEERING_APPLIED_METHOD = "session/steering_applied"
+LODY_SESSION_STEERING_METHOD = "lody/session/steer"
+LODY_SESSION_STEERING_APPLIED_METHOD = "lody/session/steer_applied"
+LEGACY_SESSION_STEERING_METHOD = "session/steering"
+LEGACY_SESSION_STEERING_APPLIED_METHOD = "session/steering_applied"
+
+_STEERING_APPLIED_METHODS = {
+    LODY_SESSION_STEERING_METHOD: LODY_SESSION_STEERING_APPLIED_METHOD,
+    LEGACY_SESSION_STEERING_METHOD: LEGACY_SESSION_STEERING_APPLIED_METHOD,
+}
 
 _LODY_STEERING_CAPABILITY = {
     "version": 1,
@@ -620,7 +627,8 @@ class BubACPAgent:
     async def ext_method(
         self, method: str, params: dict[str, Any]
     ) -> dict[str, object]:
-        if method != SESSION_STEERING_METHOD:
+        applied_method = _STEERING_APPLIED_METHODS.get(method)
+        if applied_method is None:
             raise RequestError.method_not_found(f"_{method}")
 
         try:
@@ -628,7 +636,7 @@ class BubACPAgent:
             outcome = await self._execute_or_queue_steering(session_id, prompt)
             if steer_id is not None:
                 await self._require_client().ext_notification(
-                    SESSION_STEERING_APPLIED_METHOD,
+                    applied_method,
                     {"sessionId": session_id, "steerId": steer_id},
                 )
                 return {"outcome": "injected"}

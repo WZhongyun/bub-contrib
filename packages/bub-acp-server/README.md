@@ -14,7 +14,7 @@ Expose Bub as an Agent Client Protocol agent.
 - Automatic recovery of the latest persisted plan into the next ACP turn's model context
 - Session-scoped model and reasoning-effort selection through ACP config options
 - ACP context-compaction notifications when `tape.handoff` runs
-- Mid-turn steering through the `_session/steering` ACP extension
+- Mid-turn steering through the `_lody/session/steer` ACP extension
 
 ## Installation
 
@@ -98,7 +98,7 @@ Send a private ACP extension request while a turn is running or after it has bec
 
 ```json
 {
-  "method": "_session/steering",
+  "method": "_lody/session/steer",
   "params": {
     "sessionId": "session-id",
     "prompt": [
@@ -114,10 +114,13 @@ Send a private ACP extension request while a turn is running or after it has bec
 
 The response outcome is `injected` when Bub consumes the message at the next model-step boundary, `startedNewTurn` when the previous turn has already passed its final boundary, or `failed` for an unexpected internal failure. Steering requests are serialized per session and preserve arrival order. The extension is private rather than part of the standard ACP method set, so clients must opt into it explicitly.
 
-`steerId` is optional for legacy clients. When present, Bub follows the
-acknowledged-steering contract: after the message is applied it sends
-`_session/steering_applied` with the same `sessionId` and `steerId`, and returns
-`injected`. This lets the client distinguish submission from application.
+When the message is applied, Bub sends `_lody/session/steer_applied` with the
+same `sessionId` and `steerId`, and returns `injected`. This lets the client
+distinguish submission from application.
+
+For compatibility with clients using the original Codex steering extension,
+Bub also accepts `_session/steering`. Its optional `steerId` uses the matching
+`_session/steering_applied` notification.
 
 ## Use In Zed
 

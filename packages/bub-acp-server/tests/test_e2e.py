@@ -28,9 +28,7 @@ class E2EClient:
         self.session_updates: list[tuple[str, object]] = []
         self.ext_notifications: list[tuple[str, dict[str, Any]]] = []
 
-    async def ext_notification(
-        self, method: str, params: dict[str, Any]
-    ) -> None:
+    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
         self.ext_notifications.append((method, params))
 
     async def read_text_file(
@@ -249,7 +247,7 @@ async def test_acknowledged_steering_starts_turn_over_extension_route(
             )
             session = await connection.new_session(cwd=str(workspace))
             response = await connection.ext_method(
-                "session/steering",
+                "lody/session/steer",
                 {
                     "sessionId": session.session_id,
                     "prompt": [{"type": "text", "text": "exercise client tools"}],
@@ -278,7 +276,7 @@ async def test_acknowledged_steering_starts_turn_over_extension_route(
         assert response == {"outcome": "injected"}
         assert client.ext_notifications == [
             (
-                "session/steering_applied",
+                "lody/session/steer_applied",
                 {"sessionId": session.session_id, "steerId": "steer-1"},
             )
         ]
@@ -288,6 +286,5 @@ async def test_acknowledged_steering_starts_turn_over_extension_route(
         for _, update in client.session_updates
     )
     assert any(
-        update.session_update == "usage_update"
-        for _, update in client.session_updates
+        update.session_update == "usage_update" for _, update in client.session_updates
     )

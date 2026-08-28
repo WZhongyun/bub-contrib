@@ -27,9 +27,7 @@ class FakeClient:
         del kwargs
         self.updates.append((session_id, update))
 
-    async def ext_notification(
-        self, method: str, params: dict[str, Any]
-    ) -> None:
+    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
         self.ext_notifications.append((method, params))
 
 
@@ -162,8 +160,15 @@ async def test_active_turn_consumes_steering_and_reports_injected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "applied_method"),
+    [
+        ("lody/session/steer", "lody/session/steer_applied"),
+        ("session/steering", "session/steering_applied"),
+    ],
+)
 async def test_acknowledged_steering_notifies_after_model_step_consumes_it(
-    tmp_path: Path,
+    tmp_path: Path, method: str, applied_method: str
 ) -> None:
     inbox = ACPSteeringInbox()
     framework = ControlledFramework(inbox)
@@ -182,7 +187,7 @@ async def test_acknowledged_steering_notifies_after_model_step_consumes_it(
     assert await framework.entered.get() == 0
     steer_task = asyncio.create_task(
         agent.ext_method(
-            "session/steering",
+            method,
             acknowledged_steering_params(
                 session.session_id, "change course", "steer-1"
             ),
@@ -198,7 +203,7 @@ async def test_acknowledged_steering_notifies_after_model_step_consumes_it(
     assert await steer_task == {"outcome": "injected"}
     assert client.ext_notifications == [
         (
-            "session/steering_applied",
+            applied_method,
             {"sessionId": session.session_id, "steerId": "steer-1"},
         )
     ]
