@@ -322,6 +322,8 @@ Before finishing, verify:
 7. Tests cover the main hook or configuration path.
 8. README describes the behavior and enablement path that the implementation actually provides.
 9. If packaged skills were added, the build config includes `SKILL.md` and scripts.
+10. If the user explicitly requested publication from `bub-contrib`, the code is already on the
+    default branch and the publish request title exactly identifies the package and version.
 
 Recommended commands to suggest, adjusted to the host project:
 
@@ -346,6 +348,35 @@ When the host project is this repository:
 - if a packaged agent skill is needed, mirror the `src/skills/<name>/` convention used by channel
   plugins in this repo
 
+### Publish Request
+
+在 `bub-contrib` 中，创建或更新插件不代表自动申请发布。除非用户明确要求发布或创建发布请求，否则不要创建 issue，也不要从本地运行 `uv publish`。
+
+申请发布前必须确认代码已经合并到默认分支，然后使用仓库的 **Publish request** issue template。Issue 标题必须严格使用：
+
+```text
+Request for publish: <package> <version>
+```
+
+例如：
+
+```text
+Request for publish: bub-example 1.2.3
+```
+
+Publish request workflow 会校验：
+
+- 标题包含合法的 package 和 PEP 440 版本。
+- package 存在于 `packages/`，且目录名与 `project.name` 一致。
+- `uv version --dry-run` 接受请求版本。
+- PyPI 尚未发布相同 package/version。
+
+PyPI 版本检查使用 `https://pypi.org/pypi/<package>/<version>/json`。只有 HTTP 404 表示版本可用；已存在的版本、其他 HTTP 错误或网络错误都必须阻止发布。
+
+Request validation 成功时不需要 comment。维护者审查后添加 `to-be-published` label，workflow 会在真正发布前再次校验，通过 PyPI Trusted Publishing 构建并发布 package。GitHub Actions 会把实际发布结果 comment 到 issue；成功时关闭 issue，失败时移除 label，以便修复后重试。
+
+不要通过修改 workflow、手动上传或更换版本字符串的等价写法绕过冲突检查。若用户要求完成发布请求但代码尚未进入默认分支，应说明这一前置条件，而不是提前创建可执行的发布请求。
+
 ## Output Contract
 
 When using this skill to implement a plugin, the final response should state:
@@ -355,4 +386,5 @@ When using this skill to implement a plugin, the final response should state:
 - how the plugin was wired into the Bub environment
 - whether a packaged agent skill was added
 - what tests should be run
+- whether a `bub-contrib` publish request was explicitly requested, created, or remains a next step
 - any remaining assumptions, especially credentials, endpoints, and runtime environment
