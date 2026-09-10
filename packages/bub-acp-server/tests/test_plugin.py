@@ -12,7 +12,9 @@ from bub.model_selection import ModelChoice, ModelOptions
 from bub.streaming import AsyncStreamEvents, StreamEvent, StreamState
 from bub.tape import (
     LAST_ANCHOR,
+    AsyncTapeStoreAdapter,
     InMemoryTapeStore,
+    Tape,
     TapeContext,
     TapeEntry,
     TapeQuery,
@@ -52,6 +54,9 @@ class FakeFramework:
     def bind_channel_router(self, router: object) -> None:
         self.previous_routers.append(router)
         self.router = router
+
+    def get_tape_store(self) -> None:
+        return None
 
     async def quit_via_channel_router(self, session_id: str) -> None:
         return None
@@ -374,9 +379,13 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
 
     assert response is not None
     assert framework.tape_store.queries == [
-        agent_module._session_tape_name(
-            agent_module._bub_session_id("acp-server", session_id), tmp_path
+        Tape(
+            archive_path=tmp_path,
+            store=AsyncTapeStoreAdapter(InMemoryTapeStore()),
+            context=TapeContext(),
         )
+        .session_tape(f"acp-server:{session_id}", tmp_path)
+        .name
     ]
     update_names = [update.session_update for _, update in client.updates]
     assert update_names == [
@@ -391,6 +400,92 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
     assert client.updates[2][1].content[0].content.text == "$ printf ok\n\n"
     assert client.updates[3][1].content[0].content.text == "$ printf ok\n\nok"
     assert client.updates[3][1].raw_output == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["memory", "async", "file"])
+async def test_load_session_uses_bub_tape_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    from bub.store import FileTapeStore
+
+    store = (
+        FileTapeStore(tmp_path / "tapes") if backend == "file" else InMemoryTapeStore()
+    )
+    async_store = AsyncTapeStoreAdapter(store)
+    tape = Tape(tmp_path, async_store, TapeContext()).session_tape(
+        "acp-server:history", tmp_path
+    )
+    await async_store.append(
+        tape.name,
+        TapeEntry.tool_call(
+            [
+                {
+                    "name": "bash",
+                    "arguments": {"cmd": "pwd", "title": "Show directory"},
+                },
+                {"name": "fs.read", "arguments": {"path": "README.md"}},
+            ]
+        ),
+    )
+    await async_store.append(tape.name, TapeEntry.tool_result(["/workspace", "readme"]))
+    await async_store.append(
+        tape.name,
+        TapeEntry.tool_call(
+            [
+                {"name": "tape.handoff", "arguments": {"name": "checkpoint"}},
+            ]
+        ),
+    )
+    await async_store.append(
+        tape.name, TapeEntry.tool_result(["anchor added: checkpoint"])
+    )
+    framework = FakeFramework()
+    monkeypatch.setattr(
+        framework,
+        "get_tape_store",
+        lambda: async_store if backend == "async" else store,
+    )
+    agent = BubACPAgent(framework)
+    client = FakeClient()
+    agent.on_connect(client)
+
+    await agent.load_session(cwd=str(tmp_path), session_id="history")
+
+    updates = [update for _, update in client.updates]
+    assert [update.tool_call_id for update in updates] == [
+        "tool-0",
+        "tool-1",
+        "tool-0",
+        "tool-1",
+        "tool-2",
+        "tool-2",
+    ]
+    assert updates[0].title == "Show directory"
+    assert updates[2].content[0].content.text == "$ pwd\n\n/workspace"
+    assert updates[3].content[0].content.text == "readme"
+    assert updates[4].title == "Context compacting"
+    assert updates[5].title == "Context compacted"
+
+
+@pytest.mark.asyncio
+async def test_load_session_reports_store_errors_and_cleans_up_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    framework = TapeFramework([])
+
+    def fail(query: TapeQuery) -> list[TapeEntry]:
+        raise OSError("store unavailable")
+
+    monkeypatch.setattr(framework.tape_store, "fetch_all", fail)
+    agent = BubACPAgent(framework)
+    agent.on_connect(FakeClient())
+
+    with pytest.raises(OSError, match="store unavailable"):
+        await agent.load_session(cwd=str(tmp_path), session_id="history")
+
+    assert framework.router.pop_stream_state("history") is None
 
 
 @pytest.mark.asyncio
@@ -468,13 +563,9 @@ async def test_set_reasoning_effort_updates_session_runtime_and_config_option(
         value="high",
     )
 
-    assert agent._sessions[created.session_id].runtime == {
-        "reasoning_effort": "high"
-    }
+    assert agent._sessions[created.session_id].runtime == {"reasoning_effort": "high"}
     reasoning_option = next(
-        option
-        for option in response.config_options
-        if option.id == "reasoning_effort"
+        option for option in response.config_options if option.id == "reasoning_effort"
     )
     assert reasoning_option.current_value == "high"
 
@@ -559,7 +650,9 @@ async def test_prompt_passes_session_config_to_bub_context(tmp_path: Path) -> No
         session_id=created.session_id,
     )
 
-    assert framework.messages[0].context["_runtime_model"] == "anthropic:claude-sonnet-4-5"
+    assert (
+        framework.messages[0].context["_runtime_model"] == "anthropic:claude-sonnet-4-5"
+    )
     assert framework.messages[0].context["_runtime_reasoning_effort"] == "high"
     assert framework.messages[0].context["_runtime_workspace"] == str(tmp_path)
     assert framework.messages[0].context["chat_id"] == created.session_id
@@ -756,9 +849,7 @@ async def test_tape_handoff_is_reported_as_context_compaction() -> None:
                 ]
             },
         )
-        yield StreamEvent(
-            "tool_result", {"tool_results": ["anchor added: phase-1"]}
-        )
+        yield StreamEvent("tool_result", {"tool_results": ["anchor added: phase-1"]})
 
     async for _ in router.wrap_stream({"chat_id": "session-1"}, stream()):
         pass
@@ -823,6 +914,86 @@ async def test_stream_router_isolates_concurrent_session_state() -> None:
         if update.session_update == "tool_call_update"
     }
     assert completed_calls == {"session-1": "call-1", "session-2": "call-2"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_association_handles_reordering_duplicates_and_new_batches() -> (
+    None
+):
+    client = FakeClient()
+    router = ACPStreamRouter(client)
+
+    async def stream():
+        yield StreamEvent(
+            "tool_call",
+            {
+                "tool_calls": [
+                    {"name": "bash", "arguments": {"cmd": "pwd"}},
+                    {"name": "bash", "arguments": {"cmd": "ls"}},
+                    {"name": "bash", "arguments": {"cmd": "pwd"}},
+                ]
+            },
+        )
+        await router.attach_terminal("session", "ls", "terminal-ls")
+        await router.attach_terminal("session", "pwd", "terminal-pwd-1")
+        await router.attach_terminal("session", "pwd", "terminal-pwd-2")
+        yield StreamEvent("tool_result", {"tool_results": ["cwd", "files", "cwd"]})
+        yield StreamEvent(
+            "tool_call",
+            {
+                "tool_calls": [
+                    {"name": "bash", "arguments": {"cmd": "pwd"}},
+                ]
+            },
+        )
+        yield StreamEvent("tool_result", {"tool_results": ["cwd"]})
+
+    async for _ in router.wrap_stream({"chat_id": "session"}, stream()):
+        pass
+
+    updates = [update for _, update in client.updates]
+    assert [
+        (update.tool_call_id, update.content[1].terminal_id) for update in updates[3:6]
+    ] == [
+        ("tool-1", "terminal-ls"),
+        ("tool-0", "terminal-pwd-1"),
+        ("tool-2", "terminal-pwd-2"),
+    ]
+    assert all(update.content is None for update in updates[6:9])
+    assert updates[-1].tool_call_id == "tool-3"
+    assert updates[-1].content[0].content.text == "$ pwd\n\ncwd"
+    assert router.pop_stream_state("session").pending_tools == []
+
+
+@pytest.mark.asyncio
+async def test_prompt_failure_releases_state_and_allows_next_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    framework = FakeFramework()
+    original_process = framework.process_inbound
+    agent = BubACPAgent(framework)
+    agent.on_connect(FakeClient())
+    session = await agent.new_session(cwd=str(tmp_path))
+
+    async def fail(inbound: object, stream_output: bool = False) -> TurnResult:
+        await original_process(inbound, stream_output)
+        raise RuntimeError("turn failed")
+
+    monkeypatch.setattr(framework, "process_inbound", fail)
+    with pytest.raises(RuntimeError, match="turn failed"):
+        await agent.prompt(
+            [TextContentBlock(type="text", text="fail")], session.session_id
+        )
+
+    assert agent._prompt_runs == {}
+    assert framework.router.pop_stream_state(session.session_id) is None
+    monkeypatch.setattr(framework, "process_inbound", original_process)
+    async with asyncio.timeout(1):
+        response = await agent.prompt(
+            [TextContentBlock(type="text", text="retry")], session.session_id
+        )
+    assert response.stop_reason == "end_turn"
 
 
 @pytest.mark.asyncio

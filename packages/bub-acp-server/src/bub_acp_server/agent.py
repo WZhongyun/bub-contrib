@@ -3,17 +3,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import hashlib
-import inspect
 import json
 import logging
 import re
 from collections import deque
-from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import bub
@@ -67,8 +65,13 @@ from bub.channels.message import ChannelMessage, MediaItem, MediaType
 from bub.envelope import Envelope, content_of, field_of
 from bub.model_selection import ModelChoice, ModelOptions
 from bub.streaming import StreamEvent
-from bub.tape import TapeEntry, TapeQuery
-from bub.turn import TurnResult
+from bub.tape import (
+    AsyncTapeStoreAdapter,
+    Tape,
+    TapeContext,
+    TapeEntry,
+    is_async_tape_store,
+)
 from pydantic import TypeAdapter, ValidationError
 
 from bub_acp_server.client_tools import ACPClientToolRuntime, replace_builtin_tools
@@ -133,7 +136,6 @@ class ACPPromptRun:
     session_id: str
     started: asyncio.Event = field(default_factory=asyncio.Event)
     completed: asyncio.Event = field(default_factory=asyncio.Event)
-    background: bool = False
     task: asyncio.Task[PromptResponse] | None = None
 
 
@@ -203,13 +205,16 @@ class ACPSession:
 
 
 @dataclass(slots=True)
+class ACPToolCallState:
+    tool_id: str
+    name: str = "tool"
+    command: str | None = None
+    terminal_id: str | None = None
+
+
+@dataclass(slots=True)
 class ACPStreamState:
-    tool_ids: dict[int, str] = field(default_factory=dict)
-    tool_commands: dict[int, str] = field(default_factory=dict)
-    pending_tool_indices: list[int] = field(default_factory=list)
-    pending_terminal_calls: list[tuple[str | None, int]] = field(default_factory=list)
-    terminal_tool_indices: set[int] = field(default_factory=set)
-    context_compaction_indices: set[int] = field(default_factory=set)
+    pending_tools: list[ACPToolCallState] = field(default_factory=list)
     next_tool_index: int = 0
     sent_text: bool = False
     reported_usage: tuple[int, int] | None = None
@@ -258,19 +263,17 @@ class ACPStreamRouter:
 
     async def publish_event(self, session_id: str, event: StreamEvent) -> None:
         state = self._stream_states.setdefault(session_id, ACPStreamState())
-        if event.kind == "text":
+        if event.kind in ("text", "reasoning", "user_text"):
             delta = str(event.data.get("delta", ""))
             if delta:
-                state.sent_text = True
-                await self._send_agent_text(session_id, delta)
-        elif event.kind == "reasoning":
-            delta = str(event.data.get("delta", ""))
-            if delta:
-                await self._send_agent_thought(session_id, delta)
-        elif event.kind == "user_text":
-            delta = str(event.data.get("delta", ""))
-            if delta:
-                await self._send_user_text(session_id, delta)
+                if event.kind == "text":
+                    state.sent_text = True
+                update = {
+                    "text": update_agent_message_text,
+                    "reasoning": update_agent_thought_text,
+                    "user_text": update_user_message_text,
+                }[event.kind](delta)
+                await self._client.session_update(session_id, update)
         elif event.kind == "tool_call":
             await self._send_tool_calls(session_id, event.data)
         elif event.kind == "tool_result":
@@ -310,86 +313,60 @@ class ACPStreamRouter:
             return
         await self._client.session_update(session_id, update_agent_message_text(text))
 
-    async def _send_agent_thought(self, session_id: str, text: str) -> None:
-        if not text:
-            return
-        await self._client.session_update(session_id, update_agent_thought_text(text))
-
-    async def _send_user_text(self, session_id: str, text: str) -> None:
-        if not text:
-            return
-        await self._client.session_update(session_id, update_user_message_text(text))
-
     async def _send_tool_calls(self, session_id: str, data: StreamPayload) -> None:
         state = self._stream_states[session_id]
-        state.pending_terminal_calls = []
-        if "tool_calls" not in data:
-            index = await self._send_tool_call(session_id, data)
-            state.pending_tool_indices = [index]
-            return
-
-        calls = _list_payload(data.get("tool_calls"))
-        state.pending_tool_indices = []
-        for call in calls:
-            index = await self._send_tool_call(session_id, {"call": call})
-            state.pending_tool_indices.append(index)
-
-    async def _send_tool_call(self, session_id: str, data: StreamPayload) -> int:
-        state = self._stream_states[session_id]
-        index = _int_value(data.get("index"), default=state.next_tool_index)
-        state.next_tool_index = max(state.next_tool_index, index + 1)
-        call = data.get("call")
-        tool_id = _tool_call_id(index, call)
-        state.tool_ids[index] = tool_id
-        tool_name = _tool_name(call)
-        is_context_compaction = tool_name == "tape.handoff"
-        title = "Context compacting" if is_context_compaction else _tool_title(call)
-        content = None
-        if tool_name == "bash":
-            command = _tool_command(call)
-            state.pending_terminal_calls.append((command, index))
-            if command is not None:
-                state.tool_commands[index] = command
-                content = [tool_content(text_block(f"$ {command}\n\n"))]
-        if is_context_compaction:
-            state.context_compaction_indices.add(index)
-        update = start_tool_call(
-            tool_id,
-            title,
-            kind="other" if is_context_compaction else _tool_kind(tool_name),
-            status="in_progress",
-            content=content,
-            raw_input=_tool_raw_input(call),
-        )
-        if is_context_compaction:
-            update.field_meta = {"contextCompaction": True}
-        await self._client.session_update(session_id, update)
-        return index
+        state.pending_tools = []
+        for call in _list_payload(data.get("tool_calls")):
+            tool = ACPToolCallState(
+                tool_id=_tool_call_id(state.next_tool_index, call),
+                name=_tool_name(call),
+            )
+            state.next_tool_index += 1
+            state.pending_tools.append(tool)
+            raw_input = _tool_raw_input(call)
+            title = tool.name
+            content = None
+            if tool.name == "bash":
+                command = _block_value(raw_input, "cmd")
+                if isinstance(command, str) and command:
+                    tool.command = command
+                    title = command
+                    content = [tool_content(text_block(f"$ {command}\n\n"))]
+                custom_title = _block_value(raw_input, "title")
+                if isinstance(custom_title, str) and custom_title.strip():
+                    title = custom_title
+            is_context_compaction = tool.name == "tape.handoff"
+            update = start_tool_call(
+                tool.tool_id,
+                "Context compacting" if is_context_compaction else title,
+                kind="other" if is_context_compaction else _tool_kind(tool.name),
+                status="in_progress",
+                content=content,
+                raw_input=raw_input,
+            )
+            if is_context_compaction:
+                update.field_meta = {"contextCompaction": True}
+            await self._client.session_update(session_id, update)
 
     async def attach_terminal(
         self, session_id: str, command: str, terminal_id: str
     ) -> None:
         state = self._stream_states.get(session_id)
-        if state is None or not state.pending_terminal_calls:
+        if state is None:
             return
-
-        position = next(
-            (
-                position
-                for position, (pending_command, _) in enumerate(
-                    state.pending_terminal_calls
-                )
-                if pending_command == command
-            ),
-            0,
-        )
-        _, index = state.pending_terminal_calls.pop(position)
-        tool_id = state.tool_ids[index]
-        state.terminal_tool_indices.add(index)
+        pending = [
+            tool
+            for tool in state.pending_tools
+            if tool.name == "bash" and tool.terminal_id is None
+        ]
+        if not pending:
+            return
+        tool = next((tool for tool in pending if tool.command == command), pending[0])
+        tool.terminal_id = terminal_id
         await self._client.session_update(
             session_id,
             update_tool_call(
-                tool_id,
+                tool.tool_id,
                 status="in_progress",
                 content=[
                     tool_content(text_block(f"$ {command}\n\n")),
@@ -400,43 +377,30 @@ class ACPStreamRouter:
 
     async def _send_tool_results(self, session_id: str, data: StreamPayload) -> None:
         state = self._stream_states[session_id]
-        if "tool_results" not in data:
-            await self._send_tool_result(session_id, data)
-            state.pending_tool_indices = []
-            return
-
-        results = _list_payload(data.get("tool_results"))
-        for position, result in enumerate(results):
-            if position < len(state.pending_tool_indices):
-                index = state.pending_tool_indices[position]
+        for position, result in enumerate(_list_payload(data.get("tool_results"))):
+            if position < len(state.pending_tools):
+                tool = state.pending_tools[position]
             else:
-                index = state.next_tool_index
+                tool = ACPToolCallState(tool_id=f"tool-{state.next_tool_index}")
                 state.next_tool_index += 1
-            await self._send_tool_result(session_id, {"index": index, "result": result})
-        state.pending_tool_indices = []
-
-    async def _send_tool_result(self, session_id: str, data: StreamPayload) -> None:
-        state = self._stream_states[session_id]
-        index = _int_value(data.get("index"), default=0)
-        tool_id = state.tool_ids.get(index, f"tool-{index}")
-        result = data.get("result")
-        content = None
-        is_context_compaction = index in state.context_compaction_indices
-        if index not in state.terminal_tool_indices and not is_context_compaction:
-            output = _stringify(result)
-            if (command := state.tool_commands.get(index)) is not None:
-                output = f"$ {command}\n\n{output}"
-            content = [tool_content(text_block(output))]
-        update = update_tool_call(
-            tool_id,
-            title="Context compacted" if is_context_compaction else None,
-            status="completed",
-            raw_output=result,
-            content=content,
-        )
-        if is_context_compaction:
-            update.field_meta = {"contextCompaction": True}
-        await self._client.session_update(session_id, update)
+            content = None
+            is_context_compaction = tool.name == "tape.handoff"
+            if tool.terminal_id is None and not is_context_compaction:
+                output = _stringify(result)
+                if tool.command is not None:
+                    output = f"$ {tool.command}\n\n{output}"
+                content = [tool_content(text_block(output))]
+            update = update_tool_call(
+                tool.tool_id,
+                title="Context compacted" if is_context_compaction else None,
+                status="completed",
+                raw_output=result,
+                content=content,
+            )
+            if is_context_compaction:
+                update.field_meta = {"contextCompaction": True}
+            await self._client.session_update(session_id, update)
+        state.pending_tools = []
 
 
 class BubACPAgent:
@@ -513,17 +477,13 @@ class BubACPAgent:
         **kwargs: Any,
     ) -> NewSessionResponse:
         del mcp_servers, kwargs
-        session_id = uuid4().hex
-        session = ACPSession(
-            session_id=session_id,
-            cwd=Path(cwd).expanduser().resolve(),
-            additional_directories=list(additional_directories or []),
+        session = self._load_or_adopt_session(
+            session_id=uuid4().hex,
+            cwd=cwd,
+            additional_directories=additional_directories,
         )
-        session.touch()
-        self._sessions[session_id] = session
-        self._save_sessions()
         return NewSessionResponse(
-            session_id=session_id,
+            session_id=session.session_id,
             config_options=await self._session_config_options(session),
         )
 
@@ -589,15 +549,12 @@ class BubACPAgent:
             self._sessions.pop(session_id, None)
             self._save_sessions()
             run = self._current_prompt_run(session_id)
-            if (
-                run is not None
-                and run.background
-                and not run.started.is_set()
-                and run.task is not None
-            ):
+            if run is not None and not run.started.is_set() and run.task is not None:
                 run.task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await run.task
+                # A task cancelled before its first step never enters its finally block.
+                self._complete_prompt_run(run)
             return CloseSessionResponse()
         finally:
             self._steering_locks.pop(session_id, None)
@@ -630,12 +587,11 @@ class BubACPAgent:
         **kwargs: Any,
     ) -> PromptResponse:
         del kwargs
-        client = self._require_client()
         session = self._sessions.get(session_id) or self._adopt_session(session_id)
         session.touch()
         self._save_sessions()
         run = self._register_prompt_run(session_id)
-        return await self._execute_prompt(prompt, session, client, run)
+        return await self._execute_prompt(prompt, session, run)
 
     async def ext_method(
         self, method: str, params: dict[str, Any]
@@ -728,10 +684,9 @@ class BubACPAgent:
 
         session.touch()
         self._save_sessions()
-        client = self._require_client()
-        run = self._register_prompt_run(session.session_id, background=True)
+        run = self._register_prompt_run(session.session_id)
         task = asyncio.create_task(
-            self._execute_prompt(prompt, session, client, run),
+            self._execute_prompt(prompt, session, run),
             name=f"acp-steering-{session.session_id}",
         )
         run.task = task
@@ -761,16 +716,36 @@ class BubACPAgent:
         self,
         prompt: list[ACPPromptBlock],
         session: ACPSession,
-        client: Client,
         run: ACPPromptRun,
     ) -> PromptResponse:
         try:
+            client = self._require_client()
             inbound = self._build_inbound(prompt, session)
             if self.settings.send_user_message_updates:
                 await self._send_user_message_updates(prompt, session.session_id)
-            await self._process_inbound_with_streaming(
-                inbound, session, client, run=run
-            )
+            async with self._prompt_lock:
+                if run.task is not None and (
+                    session.session_id in self._closing_sessions
+                    or session.session_id not in self._sessions
+                ):
+                    raise RequestError.invalid_request(
+                        {"sessionId": session.session_id}
+                    )
+                run.started.set()
+                router = self._require_stream_router()
+                try:
+                    result = await self.framework.process_inbound(
+                        inbound, stream_output=True
+                    )
+                finally:
+                    stream_state = router.pop_stream_state(session.session_id)
+                if result.model_output and not (
+                    stream_state is not None and stream_state.sent_text
+                ):
+                    await client.session_update(
+                        session.session_id,
+                        update_agent_message_text(result.model_output),
+                    )
             return PromptResponse(stop_reason="end_turn")
         finally:
             self._complete_prompt_run(run)
@@ -796,10 +771,8 @@ class BubACPAgent:
             context=context,
         )
 
-    def _register_prompt_run(
-        self, session_id: str, *, background: bool = False
-    ) -> ACPPromptRun:
-        run = ACPPromptRun(session_id=session_id, background=background)
+    def _register_prompt_run(self, session_id: str) -> ACPPromptRun:
+        run = ACPPromptRun(session_id=session_id)
         self._prompt_runs.setdefault(session_id, deque()).append(run)
         return run
 
@@ -870,17 +843,11 @@ class BubACPAgent:
         cwd: str,
         additional_directories: list[str] | None,
     ) -> ACPSession:
-        session = self._sessions.get(session_id)
-        if session is None:
-            session = ACPSession(
-                session_id=session_id,
-                cwd=Path(cwd).expanduser().resolve(),
-                additional_directories=list(additional_directories or []),
-            )
-            self._sessions[session_id] = session
-        else:
-            session.cwd = Path(cwd).expanduser().resolve()
-            session.additional_directories = list(additional_directories or [])
+        workspace = Path(cwd).expanduser().resolve()
+        session = self._sessions.get(session_id) or ACPSession(session_id, workspace)
+        session.cwd = workspace
+        session.additional_directories = list(additional_directories or [])
+        self._sessions[session_id] = session
         session.touch()
         self._save_sessions()
         return session
@@ -933,34 +900,19 @@ class BubACPAgent:
         self, session: ACPSession
     ) -> AsyncIterator[StreamEvent]:
         entries = await self._load_tape_entries(session)
-        pending_tool_indices: list[int] = []
-        next_tool_index = 0
-
         for entry in entries:
             if entry.kind == "message":
                 event = _message_entry_stream_event(entry)
                 if event is not None:
                     yield event
             elif entry.kind == "tool_call":
-                calls = _list_payload(entry.payload.get("calls"))
-                pending_tool_indices = []
-                for call in calls:
-                    tool_index = next_tool_index
-                    next_tool_index += 1
-                    pending_tool_indices.append(tool_index)
-                    yield StreamEvent("tool_call", {"index": tool_index, "call": call})
+                yield StreamEvent(
+                    "tool_call", {"tool_calls": entry.payload.get("calls")}
+                )
             elif entry.kind == "tool_result":
-                results = _list_payload(entry.payload.get("results"))
-                for index, result in enumerate(results):
-                    if index < len(pending_tool_indices):
-                        tool_index = pending_tool_indices[index]
-                    else:
-                        tool_index = next_tool_index
-                        next_tool_index += 1
-                    yield StreamEvent(
-                        "tool_result", {"index": tool_index, "result": result}
-                    )
-                pending_tool_indices = []
+                yield StreamEvent(
+                    "tool_result", {"tool_results": entry.payload.get("results")}
+                )
             elif entry.kind == "error":
                 yield StreamEvent(
                     "error",
@@ -972,21 +924,18 @@ class BubACPAgent:
                 )
 
     async def _load_tape_entries(self, session: ACPSession) -> list[TapeEntry]:
-        tape_name = _session_tape_name(
+        store = self.framework.get_tape_store()
+        if store is None:
+            return []
+        tape = Tape(
+            archive_path=bub.home / "tapes",
+            store=store if is_async_tape_store(store) else AsyncTapeStoreAdapter(store),
+            context=TapeContext(),
+        ).session_tape(
             _bub_session_id(self.settings.channel_name, session.session_id),
             session.cwd,
         )
-        store = _framework_tape_store(self.framework)
-        if store is not None:
-            query = TapeQuery(tape_name, store)
-            with contextlib.suppress(Exception):
-                result = store.fetch_all(query)
-                if inspect.isawaitable(result):
-                    result = await result
-                return list(cast(Iterable[TapeEntry], result))
-        return _load_tape_entries_from_file(
-            bub.home.expanduser() / "tapes" / f"{tape_name}.jsonl"
-        )
+        return await tape.search(tape.query())
 
     async def _session_config_options(
         self, session: ACPSession
@@ -1032,38 +981,6 @@ class BubACPAgent:
         for block in prompt:
             if _block_type(block) == "text":
                 await client.session_update(session_id, update_user_message(block))
-
-    async def _process_inbound_with_streaming(
-        self,
-        inbound: ChannelMessage,
-        session: ACPSession,
-        client: Client,
-        *,
-        run: ACPPromptRun,
-    ) -> TurnResult:
-        async with self._prompt_lock:
-            if run.background and (
-                session.session_id in self._closing_sessions
-                or session.session_id not in self._sessions
-            ):
-                raise RequestError.invalid_request({"sessionId": session.session_id})
-            run.started.set()
-            router = self._require_stream_router()
-            try:
-                result = await self.framework.process_inbound(
-                    inbound, stream_output=True
-                )
-            except BaseException:
-                router.pop_stream_state(session.session_id)
-                raise
-            stream_state = router.pop_stream_state(session.session_id)
-            if result.model_output and not (
-                stream_state is not None and stream_state.sent_text
-            ):
-                await client.session_update(
-                    session.session_id, update_agent_message_text(result.model_output)
-                )
-            return result
 
 
 async def run_acp_agent(
@@ -1180,23 +1097,6 @@ def _tool_raw_input(call: object) -> object:
     return call
 
 
-def _tool_command(call: object) -> str | None:
-    raw_input = _tool_raw_input(call)
-    command = _block_value(raw_input, "cmd", None)
-    return command if isinstance(command, str) and command else None
-
-
-def _tool_title(call: object) -> str:
-    name = _tool_name(call)
-    if name == "bash":
-        title = _block_value(_tool_raw_input(call), "title", None)
-        if isinstance(title, str) and title.strip():
-            return title
-        if command := _tool_command(call):
-            return command
-    return name
-
-
 def _tool_kind(name: str) -> ToolKind:
     lower_name = name.lower()
     if any(token in lower_name for token in ("read", "cat", "view")):
@@ -1210,12 +1110,6 @@ def _tool_kind(name: str) -> ToolKind:
     if any(token in lower_name for token in ("bash", "shell", "exec", "run")):
         return "execute"
     return "other"
-
-
-def _int_value(value: object, *, default: int) -> int:
-    with contextlib.suppress(TypeError, ValueError):
-        return int(value)
-    return default
 
 
 def _event_usage(event: StreamEvent) -> object:
@@ -1267,14 +1161,6 @@ def _non_negative_int(value: object) -> int | None:
         if result >= 0:
             return result
     return None
-
-
-def _framework_tape_store(framework: BubFramework) -> object | None:
-    get_tape_store = getattr(framework, "get_tape_store", None)
-    if get_tape_store is None:
-        return None
-    store = get_tape_store()
-    return store if hasattr(store, "fetch_all") else None
 
 
 def _model_options_to_acp_config_options(
@@ -1330,58 +1216,6 @@ def _reasoning_effort_config_option(
             for value, name in REASONING_EFFORT_OPTIONS
         ],
     )
-
-
-def _session_tape_name(session_id: str, workspace: Path) -> str:
-    workspace_hash = hashlib.md5(
-        str(workspace.resolve()).encode("utf-8"), usedforsecurity=False
-    ).hexdigest()[:16]
-    session_hash = hashlib.md5(
-        session_id.encode("utf-8"), usedforsecurity=False
-    ).hexdigest()[:16]
-    return f"{workspace_hash}__{session_hash}"
-
-
-def _load_tape_entries_from_file(path: Path) -> list[TapeEntry]:
-    entries: list[TapeEntry] = []
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for raw_line in handle:
-                entry = _tape_entry_from_json_line(raw_line)
-                if entry is not None:
-                    entries.append(entry)
-    except OSError:
-        return []
-    return entries
-
-
-def _tape_entry_from_json_line(line: str) -> TapeEntry | None:
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        payload = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    entry_id = payload.get("id")
-    kind = payload.get("kind")
-    entry_payload = payload.get("payload")
-    meta = payload.get("meta")
-    date = payload.get("date")
-    if (
-        not isinstance(entry_id, int)
-        or not isinstance(kind, str)
-        or not isinstance(entry_payload, dict)
-    ):
-        return None
-    if not isinstance(meta, dict):
-        meta = {}
-    if not isinstance(date, str):
-        date = datetime.fromtimestamp(0.0, tz=UTC).isoformat()
-    return TapeEntry(entry_id, kind, dict(entry_payload), dict(meta), date)
 
 
 def _message_entry_stream_event(entry: TapeEntry) -> StreamEvent | None:

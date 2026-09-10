@@ -126,6 +126,32 @@ async def test_steering_inbox_receipt_distinguishes_delivery_from_claim() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("claim_first", [False, True])
+async def test_steering_claim_and_drain_deliver_each_message_once(
+    claim_first: bool,
+) -> None:
+    inbox = ACPSteeringInbox()
+    state = {"session_id": "session"}
+    message = {"content": "same message"}
+    first = await inbox.enqueue_with_receipt(message, state)
+    second = await inbox.enqueue_with_receipt(message, state)
+    await inbox.enqueue_message({"content": "another session"}, {"session_id": "other"})
+    operations = [inbox.claim_pending(first), inbox.drain_messages(state)]
+    if not claim_first:
+        operations.reverse()
+    results = await asyncio.gather(*operations)
+    claimed, drained = results if claim_first else reversed(results)
+
+    assert len(drained) + (claimed is not None) == 2
+    assert first.delivered.done() is not claim_first
+    assert second.delivered.done()
+    assert inbox.message_count(state) == 0
+    assert await inbox.drain_messages({"session_id": "other"}) == [
+        {"content": "another session"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_active_turn_consumes_steering_and_reports_injected(
     tmp_path: Path,
 ) -> None:
@@ -209,6 +235,43 @@ async def test_acknowledged_steering_notifies_after_model_step_consumes_it(
     ]
     await prompt_task
     assert [message.content for message in framework.consumed] == ["change course"]
+
+
+@pytest.mark.asyncio
+async def test_steering_acknowledges_consumption_before_turn_finishes(
+    tmp_path: Path,
+) -> None:
+    inbox = ACPSteeringInbox()
+    framework = ControlledFramework(inbox)
+    agent = BubACPAgent(cast(Any, framework), steering_inbox=inbox)
+    agent.on_connect(cast(Any, FakeClient()))
+    session = await agent.new_session(cwd=str(tmp_path))
+    state = {"session_id": f"acp-server:{session.session_id}"}
+    prompt_task = asyncio.create_task(
+        agent.prompt(
+            [{"type": "text", "text": "initial"}],
+            session.session_id,
+        )
+    )
+    await framework.entered.get()
+    steer_task = asyncio.create_task(
+        agent.ext_method(
+            "lody/session/steer",
+            acknowledged_steering_params(session.session_id, "steer"),
+        )
+    )
+    try:
+        await wait_for_message_count(inbox, state, 1)
+        assert len(await inbox.drain_messages(state)) == 1
+        async with asyncio.timeout(1):
+            assert await steer_task == {"outcome": "injected"}
+        assert not prompt_task.done()
+    finally:
+        framework.releases[0].set()
+        await prompt_task
+        if not steer_task.done():
+            steer_task.cancel()
+        await asyncio.gather(steer_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -361,6 +424,41 @@ async def test_steer_waits_for_pending_prompt_then_injects(
     await prompt_task
     assert [message.content for message in framework.consumed] == ["pending steer"]
     assert len(framework.messages) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_entered", [False, True])
+async def test_closing_session_cancels_queued_background_turn(
+    tmp_path: Path,
+    task_entered: bool,
+) -> None:
+    framework = ControlledFramework(ACPSteeringInbox())
+    agent = BubACPAgent(cast(Any, framework), steering_inbox=framework.inbox)
+    agent.on_connect(cast(Any, FakeClient()))
+    session = await agent.new_session(cwd=str(tmp_path))
+    await agent._prompt_lock.acquire()
+    steer_task = asyncio.create_task(
+        agent.ext_method(
+            "session/steering",
+            steering_params(session.session_id, "queued work"),
+        )
+    )
+    try:
+        async with asyncio.timeout(1):
+            while agent._current_prompt_run(session.session_id) is None:
+                await asyncio.sleep(0)
+            if task_entered:
+                await asyncio.sleep(0)
+            await agent.close_session(session.session_id)
+            with pytest.raises(asyncio.CancelledError):
+                await steer_task
+        assert framework.messages == []
+        assert agent._prompt_runs == {}
+    finally:
+        agent._prompt_lock.release()
+        if not steer_task.done():
+            steer_task.cancel()
+        await asyncio.gather(steer_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

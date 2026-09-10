@@ -9,20 +9,13 @@ from bub.envelope import Envelope
 from bub.turn import TurnState
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class SteeringReceipt:
     """Tracks whether one queued steering message reached a model step."""
 
     key: Hashable
-    token: object
-    delivered: asyncio.Future[None]
-
-
-@dataclass(slots=True)
-class _QueuedSteering:
     message: Envelope
-    token: object | None = None
-    delivered: asyncio.Future[None] | None = None
+    delivered: asyncio.Future[None]
 
 
 class ACPSteeringInbox:
@@ -34,50 +27,46 @@ class ACPSteeringInbox:
     """
 
     def __init__(self) -> None:
-        self._messages: defaultdict[Hashable, deque[_QueuedSteering]] = defaultdict(
+        self._messages: defaultdict[Hashable, deque[SteeringReceipt]] = defaultdict(
             deque
         )
-        self._lock = asyncio.Lock()
+
+    # Queue mutations contain no awaits, so they are atomic on the event loop.
 
     async def enqueue_message(self, message: Envelope, state: TurnState) -> None:
-        async with self._lock:
-            self._messages[self._key(state)].append(_QueuedSteering(message))
+        await self.enqueue_with_receipt(message, state)
 
     async def enqueue_with_receipt(
         self, message: Envelope, state: TurnState
     ) -> SteeringReceipt:
         key = self._key(state)
-        token = object()
-        delivered = asyncio.get_running_loop().create_future()
-        async with self._lock:
-            self._messages[key].append(
-                _QueuedSteering(message, token=token, delivered=delivered)
-            )
-        return SteeringReceipt(key=key, token=token, delivered=delivered)
+        receipt = SteeringReceipt(
+            key, message, asyncio.get_running_loop().create_future()
+        )
+        self._messages[key].append(receipt)
+        return receipt
 
     async def drain_messages(self, state: TurnState) -> list[Envelope]:
         key = self._key(state)
-        async with self._lock:
-            queued = list(self._messages.pop(key, ()))
-            for item in queued:
-                if item.delivered is not None and not item.delivered.done():
-                    item.delivered.set_result(None)
+        queued = self._messages.pop(key, ())
+        for item in queued:
+            if not item.delivered.done():
+                item.delivered.set_result(None)
         return [item.message for item in queued]
 
     async def claim_pending(self, receipt: SteeringReceipt) -> Envelope | None:
         """Remove and return a receipt's message if no model step consumed it."""
 
-        async with self._lock:
-            queued = self._messages.get(receipt.key)
-            if queued is None:
-                return None
-            for index, item in enumerate(queued):
-                if item.token is receipt.token:
-                    del queued[index]
-                    if not queued:
-                        self._messages.pop(receipt.key, None)
-                    return item.message
-        return None
+        queued = self._messages.get(receipt.key)
+        if queued is None:
+            return None
+        try:
+            queued.remove(receipt)
+        except ValueError:
+            return None
+        if not queued:
+            self._messages.pop(receipt.key, None)
+        return receipt.message
 
     def message_count(self, state: TurnState) -> int:
         return len(self._messages.get(self._key(state), ()))

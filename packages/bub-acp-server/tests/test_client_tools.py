@@ -343,7 +343,7 @@ async def test_update_plan_updates_acp_ui_and_persists_tape(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_replaces_tape_handoff_without_changing_tape_semantics(
+async def test_keeps_builtin_tape_handoff_and_its_tape_semantics(
     tmp_path: Path,
 ) -> None:
     from bub.builtin import tools as builtin_tools  # noqa: F401
@@ -360,8 +360,7 @@ async def test_replaces_tape_handoff_without_changing_tape_semantics(
     original = REGISTRY["tape.handoff"]
 
     with replace_builtin_tools(_runtime(client)):
-        assert REGISTRY["tape.handoff"] is not original
-        assert REGISTRY["tape.handoff"].parameters == original.parameters
+        assert REGISTRY["tape.handoff"] is original
         result = await REGISTRY["tape.handoff"].run(
             name="phase-1",
             summary="Implementation complete",

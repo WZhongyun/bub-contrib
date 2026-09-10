@@ -54,7 +54,7 @@ The agent sends an ACP `usage_update` whenever the streamed usage snapshot chang
 
 ACP clients can select both the model and reasoning effort for each session. Reasoning effort defaults to `auto`; the selected value is persisted with the ACP session and passed into Bub's turn state for subsequent model calls.
 
-While the ACP server is running, it replaces Bub's `tape.handoff` tool with an equivalent implementation and reports the operation as a context-compaction tool call. Compatible clients receive `Context compacting` and `Context compacted` updates marked with `_meta.contextCompaction`.
+The ACP stream router reports Bub's built-in `tape.handoff` as a context-compaction tool call. Compatible clients receive `Context compacting` and `Context compacted` updates marked with `_meta.contextCompaction`.
 
 Bub keeps using its own configuration, tools, skills, and tapes. The ACP client starts the process and displays the session; it does not replace Bub's model setup.
 
@@ -63,6 +63,8 @@ ACP session IDs remain the protocol-facing `chat_id`. Bub namespaces its interna
 ACP session metadata is stored under Bub home as `acp-sessions.json` so compatible clients can list sessions again after restarting. Keep `BUB_HOME` stable if you want the same ACP thread list across editor launches.
 
 `bub-acp-server` supports both ACP session load and resume. `session/load` restores the matching Bub history through the same ACP streaming path used by live turns. `session/resume` attaches the editor back to the Bub session without replaying history, so later turns keep streaming through Bub's normal hook pipeline.
+
+History is read through Bub's configured tape store. Store errors are reported instead of falling back to a separate local JSONL reader.
 
 ## Steering
 

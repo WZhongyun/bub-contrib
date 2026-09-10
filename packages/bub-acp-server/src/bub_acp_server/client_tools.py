@@ -16,7 +16,7 @@ from acp.schema import (
     WaitForTerminalExitResponse,
 )
 from pydantic import BaseModel, Field
-from bub.tools import REGISTRY, Tool, ToolContext, tool
+from bub.tools import REGISTRY, ToolContext, tool
 
 _TOOL_NAMES = (
     "bash",
@@ -25,7 +25,6 @@ _TOOL_NAMES = (
     "fs.read",
     "fs.write",
     "fs.edit",
-    "tape.handoff",
     "update_plan",
 )
 type TerminalObserver = Callable[[str, str, str], Awaitable[None]]
@@ -228,14 +227,7 @@ class ACPClientToolRuntime:
             for item in plan
         ]
         payload: dict[str, object] = {
-            "entries": [
-                {
-                    "content": item.step,
-                    "priority": item.priority,
-                    "status": item.status,
-                }
-                for item in plan
-            ]
+            "entries": [entry.model_dump(exclude_none=True) for entry in entries]
         }
         if request.explanation:
             payload["explanation"] = request.explanation
@@ -245,15 +237,6 @@ class ACPClientToolRuntime:
             _session_id(context), acp_update_plan(entries)
         )
         return f"Plan updated with {len(plan)} steps"
-
-    @staticmethod
-    async def tape_handoff(
-        name: str,
-        summary: str,
-        context: ToolContext,
-    ) -> str:
-        await context.tape.handoff(name=name, state={"summary": summary})
-        return f"anchor added: {name}"
 
     def _require_client(self) -> Client:
         if self._client is None:
@@ -282,7 +265,7 @@ def replace_builtin_tools(runtime: ACPClientToolRuntime) -> Generator[None]:
                 REGISTRY[name] = original
 
 
-def _register_replacements(runtime: ACPClientToolRuntime) -> dict[str, Tool]:
+def _register_replacements(runtime: ACPClientToolRuntime) -> None:
     @tool(name="bash", context=True)
     async def bash(
         cmd: str,
@@ -359,30 +342,6 @@ def _register_replacements(runtime: ACPClientToolRuntime) -> dict[str, Tool]:
     ) -> str:
         """Replace the ACP session plan and persist it to the current tape."""
         return await runtime.update_plan(request, context)
-
-    @tool(name="tape.handoff", context=True)
-    async def tape_handoff(
-        name: str = "handoff",
-        summary: str = "",
-        *,
-        context: ToolContext,
-    ) -> str:
-        """Compact the current context by adding a handoff anchor."""
-        return await runtime.tape_handoff(name, summary, context)
-
-    return {
-        tool_item.name: tool_item
-        for tool_item in (
-            bash,
-            bash_output,
-            kill_bash,
-            fs_read,
-            fs_write,
-            fs_edit,
-            tape_handoff,
-            update_plan_tool,
-        )
-    }
 
 
 def _session_id(context: ToolContext) -> str:
