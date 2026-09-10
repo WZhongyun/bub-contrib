@@ -289,10 +289,17 @@ def _register_replacements(runtime: ACPClientToolRuntime) -> dict[str, Tool]:
         cwd: str | None = None,
         timeout_seconds: int = 30,
         background: bool = False,
+        title: str | None = None,
         *,
         context: ToolContext,
     ) -> str:
-        """Run a shell command through the ACP client terminal."""
+        """Run a shell command through the ACP client terminal.
+
+        Set title to a short description displayed as the ACP tool call title.
+        If omitted, the command is used as the title.
+        """
+        # ACPStreamRouter reads the title from the streamed tool call arguments.
+        del title
         return await runtime.bash(cmd, cwd, timeout_seconds, background, context)
 
     @tool(name="bash.output", context=True)

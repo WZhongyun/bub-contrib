@@ -1175,8 +1175,12 @@ def _tool_command(call: object) -> str | None:
 
 def _tool_title(call: object) -> str:
     name = _tool_name(call)
-    if name == "bash" and (command := _tool_command(call)):
-        return command
+    if name == "bash":
+        title = _block_value(_tool_raw_input(call), "title", None)
+        if isinstance(title, str) and title.strip():
+            return title
+        if command := _tool_command(call):
+            return command
     return name
 
 

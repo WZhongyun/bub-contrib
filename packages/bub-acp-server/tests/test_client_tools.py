@@ -209,7 +209,10 @@ async def test_edit_preserves_missing_trailing_newline(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_replaces_bash_with_acp_terminal_calls(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extra_args", [{}, {"title": "Show working directory"}])
+async def test_replaces_bash_with_acp_terminal_calls(
+    tmp_path: Path, extra_args: dict[str, str]
+) -> None:
     from bub.builtin import tools as builtin_tools  # noqa: F401
 
     client = FakeClient()
@@ -224,8 +227,16 @@ async def test_replaces_bash_with_acp_terminal_calls(tmp_path: Path) -> None:
     runtime.set_terminal_observer(observe_terminal)
     with replace_builtin_tools(runtime):
         assert REGISTRY["bash"] is not original
-        assert REGISTRY["bash"].parameters == original.parameters
-        result = await REGISTRY["bash"].run(cmd="pwd", context=context)
+        parameters = REGISTRY["bash"].parameters
+        assert "title" in parameters["properties"]
+        assert "title" not in parameters.get("required", [])
+        assert {
+            name: schema
+            for name, schema in parameters["properties"].items()
+            if name != "title"
+        } == original.parameters["properties"]
+        assert parameters.get("required") == original.parameters.get("required")
+        result = await REGISTRY["bash"].run(cmd="pwd", context=context, **extra_args)
 
     assert REGISTRY["bash"] is original
     assert result == "hello"

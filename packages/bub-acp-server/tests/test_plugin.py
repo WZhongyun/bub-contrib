@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -649,9 +650,23 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
+@pytest.mark.parametrize(
+    ("extra_args", "expected_title"),
+    [
+        ({}, "pwd"),
+        ({"title": "Show working directory"}, "Show working directory"),
+        ({"title": None}, "pwd"),
+        ({"title": ""}, "pwd"),
+        ({"title": "   "}, "pwd"),
+    ],
+)
+@pytest.mark.parametrize("serialize_arguments", [False, True])
+async def test_bash_tool_call_attaches_acp_terminal_content(
+    extra_args: dict[str, object], expected_title: str, serialize_arguments: bool
+) -> None:
     client = FakeClient()
     router = ACPStreamRouter(client)
+    arguments = {"cmd": "pwd", **extra_args}
 
     async def stream():
         yield StreamEvent(
@@ -663,7 +678,11 @@ async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
                         "type": "function",
                         "function": {
                             "name": "bash",
-                            "arguments": '{"cmd":"pwd"}',
+                            "arguments": (
+                                json.dumps(arguments)
+                                if serialize_arguments
+                                else arguments
+                            ),
                         },
                     }
                 ]
@@ -678,8 +697,8 @@ async def test_bash_tool_call_attaches_acp_terminal_content() -> None:
     start = client.updates[0][1]
     terminal_update = client.updates[1][1]
     result_update = client.updates[2][1]
-    assert start.title == "pwd"
-    assert start.raw_input == {"cmd": "pwd"}
+    assert start.title == expected_title
+    assert start.raw_input == arguments
     assert terminal_update.tool_call_id == "call-1"
     assert terminal_update.status == "in_progress"
     assert terminal_update.content[0].type == "terminal"

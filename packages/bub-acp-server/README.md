@@ -46,6 +46,8 @@ bub-acp-server
 
 The process speaks ACP over stdio. Prompts are sent through Bub's hook pipeline with stream output enabled, so model chunks and tool events can be displayed by the ACP client as they arrive.
 
+The replacement `bash` tool accepts an optional `title` parameter for the ACP tool call display, for example `{"cmd": "git status --short", "title": "Check working tree changes"}`. If `title` is omitted or blank, the command is displayed as the title.
+
 The agent sends an ACP `usage_update` whenever the streamed usage snapshot changes, with a final end-of-stream check as a fallback. Missing token usage is reported as `0`. If the model provider does not report its context-window size, set `BUB_ACP_SERVER_CONTEXT_WINDOW_SIZE`; the default is `128000` tokens.
 
 ACP clients can select both the model and reasoning effort for each session. Reasoning effort defaults to `auto`; the selected value is persisted with the ACP session and passed into Bub's turn state for subsequent model calls.
