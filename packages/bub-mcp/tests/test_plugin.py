@@ -184,6 +184,54 @@ def test_channel_list_reads_current_config(monkeypatch, tmp_path: Path) -> None:
     assert channel.list() == {}
 
 
+def test_embedded_channel_can_keep_runtime_alive_when_all_servers_fail(
+    monkeypatch,
+) -> None:
+    class EmbeddedChannel(plugin.MCPChannel):
+        stop_when_all_failed = False
+
+    channel = EmbeddedChannel.from_server_configs({"broken": {"command": "broken"}})
+
+    async def fake_connect_server(
+        server_name: str, server_config: dict[str, object]
+    ) -> plugin.MCPServerState:
+        del server_name, server_config
+        return plugin.MCPServerState(error="connection refused")
+
+    monkeypatch.setattr(channel, "_connect_server", fake_connect_server)
+
+    async def run_test() -> None:
+        stop_event = asyncio.Event()
+        await channel.start(stop_event)
+        async with asyncio.timeout(1):
+            while "broken" not in channel.list():
+                await asyncio.sleep(0)
+        assert not stop_event.is_set()
+        await channel.stop()
+
+    asyncio.run(run_test())
+
+
+def test_default_channel_still_stops_runtime_when_all_servers_fail(monkeypatch) -> None:
+    channel = plugin.MCPChannel.from_server_configs({"broken": {"command": "broken"}})
+
+    async def fake_connect_server(
+        server_name: str, server_config: dict[str, object]
+    ) -> plugin.MCPServerState:
+        del server_name, server_config
+        return plugin.MCPServerState(error="connection refused")
+
+    monkeypatch.setattr(channel, "_connect_server", fake_connect_server)
+
+    async def run_test() -> None:
+        stop_event = asyncio.Event()
+        await channel.start(stop_event)
+        await asyncio.wait_for(stop_event.wait(), timeout=1)
+        await channel.stop()
+
+    asyncio.run(run_test())
+
+
 def test_bootstrap_records_failed_server_and_keeps_successful_servers(
     monkeypatch, tmp_path: Path
 ) -> None:
