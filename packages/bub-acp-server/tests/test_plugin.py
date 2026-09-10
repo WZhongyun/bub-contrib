@@ -342,7 +342,19 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
             },
         ),
         TapeEntry(2, "message", {"role": "assistant", "content": "Hi"}),
-        TapeEntry(3, "tool_call", {"calls": [{"id": "call-1", "name": "bash"}]}),
+        TapeEntry(
+            3,
+            "tool_call",
+            {
+                "calls": [
+                    {
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": {"cmd": "printf ok", "title": "Print greeting"},
+                    }
+                ]
+            },
+        ),
         TapeEntry(4, "tool_result", {"results": ["ok"]}),
         TapeEntry(
             5,
@@ -375,6 +387,10 @@ async def test_load_session_attaches_tape_history_through_streaming_router(
     ]
     assert client.updates[0][1].content.text == "HELLO"
     assert client.updates[1][1].content.text == "Hi"
+    assert client.updates[2][1].title == "Print greeting"
+    assert client.updates[2][1].content[0].content.text == "$ printf ok\n\n"
+    assert client.updates[3][1].content[0].content.text == "$ printf ok\n\nok"
+    assert client.updates[3][1].raw_output == "ok"
 
 
 @pytest.mark.asyncio
@@ -643,9 +659,10 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
     assert second_call.kind == "read"
     assert first_result.tool_call_id == "call-1"
     assert first_result.raw_output == "/workspace"
-    assert first_result.content[0].content.text == "/workspace"
+    assert first_result.content[0].content.text == "$ pwd\n\n/workspace"
     assert second_result.tool_call_id == "call-2"
     assert second_result.raw_output == "README content"
+    assert second_result.content[0].content.text == "README content"
     assert client.updates[-1][1].content.text == " world"
 
 
@@ -661,12 +678,18 @@ async def test_prompt_streams_bub_events_to_acp_client() -> None:
     ],
 )
 @pytest.mark.parametrize("serialize_arguments", [False, True])
+@pytest.mark.parametrize("command", ["pwd", "pwd\nprintf 'done\\n'"])
 async def test_bash_tool_call_attaches_acp_terminal_content(
-    extra_args: dict[str, object], expected_title: str, serialize_arguments: bool
+    extra_args: dict[str, object],
+    expected_title: str,
+    serialize_arguments: bool,
+    command: str,
 ) -> None:
     client = FakeClient()
     router = ACPStreamRouter(client)
-    arguments = {"cmd": "pwd", **extra_args}
+    arguments = {"cmd": command, **extra_args}
+    if expected_title == "pwd":
+        expected_title = command
 
     async def stream():
         yield StreamEvent(
@@ -688,7 +711,7 @@ async def test_bash_tool_call_attaches_acp_terminal_content(
                 ]
             },
         )
-        await router.attach_terminal("session-1", "pwd", "terminal-1")
+        await router.attach_terminal("session-1", command, "terminal-1")
         yield StreamEvent("tool_result", {"tool_results": ["/workspace"]})
 
     async for _ in router.wrap_stream({"chat_id": "session-1"}, stream()):
@@ -699,10 +722,13 @@ async def test_bash_tool_call_attaches_acp_terminal_content(
     result_update = client.updates[2][1]
     assert start.title == expected_title
     assert start.raw_input == arguments
+    assert start.content[0].content.text == f"$ {command}\n\n"
     assert terminal_update.tool_call_id == "call-1"
     assert terminal_update.status == "in_progress"
-    assert terminal_update.content[0].type == "terminal"
-    assert terminal_update.content[0].terminal_id == "terminal-1"
+    assert len(terminal_update.content) == 2
+    assert terminal_update.content[0].content.text == f"$ {command}\n\n"
+    assert terminal_update.content[1].type == "terminal"
+    assert terminal_update.content[1].terminal_id == "terminal-1"
     assert result_update.tool_call_id == "call-1"
     assert result_update.status == "completed"
     assert result_update.raw_output == "/workspace"

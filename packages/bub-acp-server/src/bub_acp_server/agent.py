@@ -205,6 +205,7 @@ class ACPSession:
 @dataclass(slots=True)
 class ACPStreamState:
     tool_ids: dict[int, str] = field(default_factory=dict)
+    tool_commands: dict[int, str] = field(default_factory=dict)
     pending_tool_indices: list[int] = field(default_factory=list)
     pending_terminal_calls: list[tuple[str | None, int]] = field(default_factory=list)
     terminal_tool_indices: set[int] = field(default_factory=set)
@@ -343,8 +344,13 @@ class ACPStreamRouter:
         tool_name = _tool_name(call)
         is_context_compaction = tool_name == "tape.handoff"
         title = "Context compacting" if is_context_compaction else _tool_title(call)
+        content = None
         if tool_name == "bash":
-            state.pending_terminal_calls.append((_tool_command(call), index))
+            command = _tool_command(call)
+            state.pending_terminal_calls.append((command, index))
+            if command is not None:
+                state.tool_commands[index] = command
+                content = [tool_content(text_block(f"$ {command}\n\n"))]
         if is_context_compaction:
             state.context_compaction_indices.add(index)
         update = start_tool_call(
@@ -352,6 +358,7 @@ class ACPStreamRouter:
             title,
             kind="other" if is_context_compaction else _tool_kind(tool_name),
             status="in_progress",
+            content=content,
             raw_input=_tool_raw_input(call),
         )
         if is_context_compaction:
@@ -384,7 +391,10 @@ class ACPStreamRouter:
             update_tool_call(
                 tool_id,
                 status="in_progress",
-                content=[tool_terminal_ref(terminal_id)],
+                content=[
+                    tool_content(text_block(f"$ {command}\n\n")),
+                    tool_terminal_ref(terminal_id),
+                ],
             ),
         )
 
@@ -413,7 +423,10 @@ class ACPStreamRouter:
         content = None
         is_context_compaction = index in state.context_compaction_indices
         if index not in state.terminal_tool_indices and not is_context_compaction:
-            content = [tool_content(text_block(_stringify(result)))]
+            output = _stringify(result)
+            if (command := state.tool_commands.get(index)) is not None:
+                output = f"$ {command}\n\n{output}"
+            content = [tool_content(text_block(output))]
         update = update_tool_call(
             tool_id,
             title="Context compacted" if is_context_compaction else None,
