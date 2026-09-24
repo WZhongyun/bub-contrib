@@ -19,21 +19,33 @@ from .inbound.c2c import QQC2CInboundService
 from .inbound.group import GROUP_EVENTS
 from .inbound.group import QQGroupInboundService
 from .inbound.group import group_was_mentioned
+from .inbound.interaction import ACK_INTERACTION_TYPES
 from .inbound.interaction import INTERACTION_QUERY
 from .inbound.interaction import INTERACTION_UPDATE
 from .inbound.interaction import build_claw_cfg
+from .inbound.interaction import build_interaction_channel_message
 from .inbound.interaction import extract_claw_cfg_update
+from .approval import PendingApproval
+from .approval import begin_approval_click
+from .approval import complete_approval_click
+from .approval import intercept_group_command
+from .approval import parse_approval_button
+from .approval import send_notice
 from .inbound.interaction import parse_interaction_event
+from .inbound.persist import persist_inbound_attachments
 from .outbound.c2c import QQC2CSendService
 from .outbound.group import QQGroupSendService
 from .protocol.auth import QQTokenProvider
 from .protocol.errors import QQOpenAPIError
 from .protocol.openapi import QQOpenAPI
 from .runtime import set_active_channel
+from .security import QQ_CONTEXT_KEY
 from .security import QQAccessPolicy
 from .session import QQInboundDeduper
 from .session import QQSessionState
+from .session import remember_session
 from .store import QQPlatformStore
+from .workspace import artifact_root
 
 # Admin toggles for proactive messages, pushed when a group admin or C2C
 # user flips the "allow active messages" switch in the QQ client.
@@ -65,6 +77,7 @@ class QQChannel(Channel):
         )
         self._policy = QQAccessPolicy.from_config(self._config)
         self._platform_store = QQPlatformStore(self._resolve_state_path())
+        self._workspace = Path.cwd().resolve()
         # In tool reply mode the model must reply through the qq.send tool,
         # so direct model output is routed to the "null" channel and dropped.
         suppress_direct_output = self._config.reply_mode == "tool"
@@ -74,6 +87,8 @@ class QQChannel(Channel):
             state=self._session_state,
             policy=self._policy,
             suppress_direct_output=suppress_direct_output,
+            workspace=self._workspace,
+            workspace_jail=self._config.workspace_jail,
         )
         self._group_inbound = QQGroupInboundService(
             channel_name=self.name,
@@ -81,6 +96,8 @@ class QQChannel(Channel):
             state=self._session_state,
             policy=self._policy,
             suppress_direct_output=suppress_direct_output,
+            workspace=self._workspace,
+            workspace_jail=self._config.workspace_jail,
         )
         self._c2c_send = QQC2CSendService(
             channel_name=self.name,
@@ -89,6 +106,7 @@ class QQChannel(Channel):
             openapi=self._openapi,
             passive_reply_window_seconds=self._config.passive_reply_window_seconds,
             passive_replies_per_msg_id=self._config.passive_replies_per_msg_id,
+            workspace=self._workspace,
         )
         self._group_send = QQGroupSendService(
             channel_name=self.name,
@@ -99,6 +117,7 @@ class QQChannel(Channel):
             passive_replies_per_msg_id=self._config.passive_replies_per_msg_id,
             active_messages=self._config.active_messages,
             platform_store=self._platform_store,
+            workspace=self._workspace,
         )
         set_active_channel(self)
 
@@ -120,8 +139,10 @@ class QQChannel(Channel):
         if mode == "webhook":
             await self._webhook.start()
             logger.info(
-                "qq.start mode=webhook reply_mode={} token_url={} openapi_base_url={} webhook=http://{}:{}{} websocket=disabled",
+                "qq.start mode=webhook reply_mode={} workspace={} artifacts={} token_url={} openapi_base_url={} webhook=http://{}:{}{} websocket=disabled",
                 self._config.reply_mode,
+                self._workspace,
+                artifact_root(self._workspace),
                 self._config.token_url,
                 self._config.openapi_base_url,
                 self._config.webhook_host,
@@ -132,8 +153,10 @@ class QQChannel(Channel):
 
         await self._websocket.start(stop_event)
         logger.info(
-            "qq.start mode=websocket reply_mode={} token_url={} openapi_base_url={} intents={} webhook=disabled",
+            "qq.start mode=websocket reply_mode={} workspace={} artifacts={} token_url={} openapi_base_url={} intents={} webhook=disabled",
             self._config.reply_mode,
+            self._workspace,
+            artifact_root(self._workspace),
             self._config.token_url,
             self._config.openapi_base_url,
             self._config.websocket_intents,
@@ -206,6 +229,13 @@ class QQChannel(Channel):
         if parsed is None:
             return
         message, channel_message = parsed
+        if self._config.workspace_jail and message.attachments:
+            channel_message.content = await persist_inbound_attachments(
+                channel_message.content,
+                message.attachments,
+                workspace=self._workspace,
+                message_id=message.message_id,
+            )
         logger.info(
             "qq.c2c.inbound session_id={} user_openid={} content_len={} attachments={}",
             channel_message.session_id,
@@ -220,6 +250,13 @@ class QQChannel(Channel):
         if parsed is None:
             return
         message, channel_message = parsed
+        if self._config.workspace_jail and message.attachments:
+            channel_message.content = await persist_inbound_attachments(
+                channel_message.content,
+                message.attachments,
+                workspace=self._workspace,
+                message_id=message.message_id,
+            )
         logger.info(
             "qq.group.inbound session_id={} group_openid={} member_openid={} was_mentioned={} is_active={} content_len={}",
             channel_message.session_id,
@@ -229,7 +266,34 @@ class QQChannel(Channel):
             channel_message.is_active,
             len(message.content),
         )
+        if await intercept_group_command(
+            channel_message, config=self._config, workspace=self._workspace
+        ):
+            return
         await self._on_receive(channel_message)
+
+    async def dispatch_approved_command(self, pending: PendingApproval) -> None:
+        """Run an approved comma command through the real Bub turn (real tape)."""
+
+        qq_context = {
+            "scope": "group",
+            "sender_id": pending.requester_id,
+            "sender_name": pending.requester_name,
+            "sender_role": "admin",
+            "group_openid": pending.group_openid,
+            "session_id": pending.session_id,
+        }
+        await self._on_receive(
+            ChannelMessage(
+                session_id=pending.session_id,
+                content=pending.command_line,
+                channel=self.name,
+                chat_id=pending.chat_id,
+                kind="command",
+                is_active=True,
+                context={QQ_CONTEXT_KEY: qq_context},
+            )
+        )
 
     async def _handle_interaction(self, payload: dict[str, Any]) -> None:
         event = parse_interaction_event(payload)
@@ -270,6 +334,92 @@ class QQChannel(Channel):
                     exc.error_code,
                     exc.error_message,
                 )
+            return
+        if event_type in ACK_INTERACTION_TYPES:
+            resolved = event.get("resolved") if isinstance(event.get("resolved"), dict) else {}
+            button_data = str(resolved.get("button_data") or "")
+            parsed = parse_approval_button(button_data)
+            if parsed is not None:
+                approval_id, decision = parsed
+                operator_id = str(
+                    event.get("group_member_openid") or event.get("user_openid") or ""
+                )
+                plan = begin_approval_click(
+                    approval_id=approval_id,
+                    decision=decision,
+                    operator_id=operator_id,
+                    config=self._config,
+                )
+                try:
+                    await self._openapi.put_interaction(
+                        interaction_id=event["id"],
+                        code=plan.ack_code,
+                    )
+                except QQOpenAPIError as exc:
+                    logger.warning(
+                        "qq.interaction.ack_failed id={} type={} code={} error={}",
+                        event["id"],
+                        event_type,
+                        exc.error_code,
+                        exc.error_message,
+                    )
+                try:
+                    notice = await complete_approval_click(plan)
+                except Exception as exc:
+                    logger.warning(
+                        "qq.approval.complete_failed id={} error={}",
+                        approval_id,
+                        exc,
+                    )
+                    notice = f"审批执行失败: {exc}"
+                if notice:
+                    group_openid = str(event.get("group_openid") or "")
+                    chat_id = (
+                        f"group:{group_openid}"
+                        if group_openid
+                        else f"c2c:{event.get('user_openid') or ''}"
+                    )
+                    session_id = f"{self.name}:{chat_id}"
+                    await send_notice(session_id, chat_id, notice)
+                return
+            try:
+                await self._openapi.put_interaction(
+                    interaction_id=event["id"],
+                    code=0,
+                )
+            except QQOpenAPIError as exc:
+                logger.warning(
+                    "qq.interaction.ack_failed id={} type={} code={} error={}",
+                    event["id"],
+                    event_type,
+                    exc.error_code,
+                    exc.error_message,
+                )
+            channel_message = build_interaction_channel_message(
+                self.name,
+                event,
+                suppress_direct_output=self._config.reply_mode == "tool",
+            )
+            if channel_message is None:
+                logger.info(
+                    "qq.interaction.unhandled type={} reason=unsupported_scene",
+                    event_type,
+                )
+                return
+            remember_session(
+                self._session_state,
+                session_id=channel_message.session_id,
+                message_id=str(event["id"]),
+                timestamp=str(event.get("timestamp") or "") or None,
+            )
+            qq_context = channel_message.context.get(QQ_CONTEXT_KEY)
+            logger.info(
+                "qq.interaction.inbound session_id={} type={} sender_id={}",
+                channel_message.session_id,
+                event_type,
+                qq_context.get("sender_id") if isinstance(qq_context, dict) else "",
+            )
+            await self._on_receive(channel_message)
             return
         logger.info("qq.interaction.unhandled type={}", event_type)
 

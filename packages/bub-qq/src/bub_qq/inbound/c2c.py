@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from bub.channels.message import ChannelMessage
@@ -12,6 +13,7 @@ from ..security import QQAccessPolicy
 from ..session import QQInboundDeduper
 from ..session import QQSessionState
 from ..session import remember_session
+from ..workspace import command_escapes_workspace
 from .common import attachment_payloads
 from .common import exclude_none
 from .common import msg_element_payloads
@@ -26,12 +28,16 @@ class QQC2CInboundService:
         state: QQSessionState,
         policy: QQAccessPolicy,
         suppress_direct_output: bool = False,
+        workspace: Path | None = None,
+        workspace_jail: bool = True,
     ) -> None:
         self._channel_name = channel_name
         self._deduper = deduper
         self._state = state
         self._policy = policy
         self._suppress_direct_output = suppress_direct_output
+        self._workspace = workspace
+        self._workspace_jail = workspace_jail
 
     def parse_inbound(
         self, payload: dict[str, Any]
@@ -60,6 +66,7 @@ class QQC2CInboundService:
                 scope="c2c", sender_id=message.user_openid
             ),
             suppress_direct_output=self._suppress_direct_output,
+            workspace=self._workspace if self._workspace_jail else None,
         )
         remember_session(
             self._state,
@@ -76,6 +83,7 @@ def build_c2c_channel_message(
     *,
     allow_command: bool = False,
     suppress_direct_output: bool = False,
+    workspace: Path | None = None,
 ) -> ChannelMessage:
     session_id = f"{channel_name}:c2c:{message.user_openid}"
     chat_id = f"c2c:{message.user_openid}"
@@ -89,13 +97,36 @@ def build_c2c_channel_message(
     }
 
     if text.startswith(","):
-        if allow_command:
+        blocked = (
+            command_escapes_workspace(text, workspace) if workspace is not None else None
+        )
+        if allow_command and blocked is None:
             return ChannelMessage(
                 session_id=session_id,
                 content=text,
                 channel=channel_name,
                 chat_id=chat_id,
                 kind="command",
+                is_active=True,
+                context=context,
+            )
+        if allow_command and blocked is not None:
+            logger.warning(
+                "qq.c2c.command_blocked user_openid={} reason=workspace_jail",
+                message.user_openid,
+            )
+            payload = {
+                "message": text,
+                "message_id": message.message_id,
+                "type": "command_blocked",
+                "sender_id": message.user_openid,
+                "blocked": blocked,
+            }
+            return ChannelMessage(
+                session_id=session_id,
+                content=json.dumps(exclude_none(payload), ensure_ascii=False),
+                channel=channel_name,
+                chat_id=chat_id,
                 is_active=True,
                 context=context,
             )
@@ -112,6 +143,9 @@ def build_c2c_channel_message(
         "date": message.timestamp,
         "attachments": attachment_payloads(message.attachments),
         "quoted_messages": msg_element_payloads(message.msg_elements),
+        "message_type": message.message_type,
+        "ark_data": message.ark_data,
+        "workspace": str(workspace) if workspace is not None else None,
     }
     return ChannelMessage(
         session_id=session_id,

@@ -74,6 +74,10 @@ class ActiveSender(Protocol):
     async def __call__(self, *, content: str) -> dict[str, object]: ...
 
 
+class MediaSender(Protocol):
+    async def __call__(self, *, msg_id: str, msg_seq: int) -> dict[str, object]: ...
+
+
 async def run_send_flow(
     *,
     state: QQSessionState,
@@ -87,6 +91,9 @@ async def run_send_flow(
     passive_replies_per_msg_id: int = DEFAULT_PASSIVE_REPLIES_PER_MSG_ID,
     send_active_text: ActiveSender | None = None,
     active_messages_allowed: bool | None = None,
+    send_media: MediaSender | None = None,
+    force_markdown: bool = False,
+    dedupe_content: str | None = None,
 ) -> dict[str, object] | None:
     msg_id = state.latest_message_id_by_session.get(session_id)
     passive_blocked_reason = _passive_blocked_reason(
@@ -106,6 +113,9 @@ async def run_send_flow(
             msg_id=msg_id,
             send_text=send_text,
             send_markdown=send_markdown,
+            send_media=send_media,
+            force_markdown=force_markdown,
+            dedupe_content=dedupe_content,
         )
 
     logger.info(
@@ -114,6 +124,20 @@ async def run_send_flow(
         msg_id or "-",
         passive_blocked_reason,
     )
+    if send_media is not None:
+        logger.warning(
+            "qq.send skipped session_id={} reason={} media=requires_passive",
+            session_id,
+            passive_blocked_reason,
+        )
+        return None
+    if force_markdown:
+        logger.warning(
+            "qq.send skipped session_id={} reason={} keyboard=requires_passive_markdown",
+            session_id,
+            passive_blocked_reason,
+        )
+        return None
     if send_active_text is None:
         logger.warning(
             "qq.send skipped session_id={} reason={} active=unavailable",
@@ -133,6 +157,7 @@ async def run_send_flow(
         target_openid=target_openid,
         content=content,
         send_active_text=send_active_text,
+        dedupe_content=dedupe_content,
     )
 
 
@@ -146,8 +171,11 @@ async def _run_passive_send(
     msg_id: str,
     send_text: MarkdownSender,
     send_markdown: MarkdownSender,
+    send_media: MediaSender | None = None,
+    force_markdown: bool = False,
+    dedupe_content: str | None = None,
 ) -> dict[str, object] | None:
-    content_hash = hash_outbound_content(content)
+    content_hash = hash_outbound_content(dedupe_content or content)
     record_key = (session_id, msg_id, content_hash)
     existing = state.send_records.get(record_key)
     if existing is not None:
@@ -163,13 +191,17 @@ async def _run_passive_send(
 
     msg_seq = next_msg_seq(state, session_id, msg_id)
     try:
-        result = await send_with_markdown_fallback(
-            content=content,
-            msg_id=msg_id,
-            msg_seq=msg_seq,
-            send_text=send_text,
-            send_markdown=send_markdown,
-        )
+        if send_media is not None:
+            result = await send_media(msg_id=msg_id, msg_seq=msg_seq)
+        else:
+            result = await send_with_markdown_fallback(
+                content=content,
+                msg_id=msg_id,
+                msg_seq=msg_seq,
+                send_text=send_text,
+                send_markdown=send_markdown,
+                force_markdown=force_markdown,
+            )
     except QQOpenAPIError as exc:
         if is_duplicate_send_error(exc):
             log_send_duplicate_error(
@@ -207,7 +239,8 @@ async def _run_passive_send(
             msg_seq=msg_seq,
             receive_mode=receive_mode,
         )
-        return None
+        release_unused_msg_seq(state, session_id, msg_id, msg_seq)
+        return build_failed_send_result(exc)
 
     state.send_records[record_key] = QQSendRecord(
         content=content,
@@ -233,8 +266,9 @@ async def _run_active_send(
     target_openid: str,
     content: str,
     send_active_text: ActiveSender,
+    dedupe_content: str | None = None,
 ) -> dict[str, object] | None:
-    content_hash = hash_outbound_content(content)
+    content_hash = hash_outbound_content(dedupe_content or content)
     record_key = (session_id, ACTIVE_MSG_ID, content_hash)
     existing = state.send_records.get(record_key)
     if existing is not None:
@@ -268,7 +302,7 @@ async def _run_active_send(
             exc.trace_id or "-",
             exc.error_message,
         )
-        return None
+        return build_failed_send_result(exc)
 
     state.send_records[record_key] = QQSendRecord(
         content=content,
@@ -339,6 +373,31 @@ def next_msg_seq(state: QQSessionState, session_id: str, msg_id: str) -> int:
     current = state.latest_sequence_by_session_and_msg_id.get(key, 0) + 1
     state.latest_sequence_by_session_and_msg_id[key] = current
     return current
+
+
+def release_unused_msg_seq(
+    state: QQSessionState, session_id: str, msg_id: str, msg_seq: int
+) -> None:
+    """Give back a seq that never produced a platform-accepted message.
+
+    Only rolls back when this seq is still the latest, so a later concurrent
+    send is not rewritten to a stale counter.
+    """
+
+    key = (session_id, msg_id)
+    if state.latest_sequence_by_session_and_msg_id.get(key) == msg_seq:
+        state.latest_sequence_by_session_and_msg_id[key] = msg_seq - 1
+
+
+def build_failed_send_result(exc: QQOpenAPIError) -> dict[str, object]:
+    result: dict[str, object] = {"status": "failed", "error": exc.error_message}
+    if exc.error_code is not None:
+        result["error_code"] = exc.error_code
+    return result
+
+
+def is_delivered_send_result(result: dict[str, object] | None) -> bool:
+    return bool(result) and result.get("status") != "failed"
 
 
 def build_already_sent_result(send_record: QQSendRecord) -> dict[str, object]:

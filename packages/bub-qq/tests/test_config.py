@@ -34,10 +34,10 @@ def test_openapi_base_url_defaults_to_unified_endpoint() -> None:
     assert config.openapi_base_url == "https://api.bot.qq.com"
 
 
-def test_reply_mode_defaults_to_direct() -> None:
+def test_reply_mode_defaults_to_tool() -> None:
     config = QQConfig()
 
-    assert config.reply_mode == "direct"
+    assert config.reply_mode == "tool"
 
 
 def test_reply_mode_rejects_unknown_values() -> None:

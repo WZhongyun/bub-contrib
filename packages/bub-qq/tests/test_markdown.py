@@ -175,6 +175,27 @@ def test_send_with_markdown_fallback_keeps_plain_text_on_text_path() -> None:
     asyncio.run(_run())
 
 
+def test_send_with_markdown_fallback_forces_markdown_for_keyboard() -> None:
+    async def _run() -> None:
+        send_text = RecordingSender(name="text")
+        send_markdown = RecordingSender(name="markdown")
+
+        result = await send_with_markdown_fallback(
+            content="请确认",
+            msg_id="message-1",
+            msg_seq=1,
+            send_text=send_text,
+            send_markdown=send_markdown,
+            force_markdown=True,
+        )
+
+        assert result == {"id": "markdown"}
+        assert send_markdown.calls[0]["content"] == "请确认"
+        assert send_text.calls == []
+
+    asyncio.run(_run())
+
+
 def test_send_with_markdown_fallback_retries_text_on_invalid_markdown() -> None:
     async def _run() -> None:
         send_text = RecordingSender(name="text")

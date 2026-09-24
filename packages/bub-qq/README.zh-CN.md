@@ -8,10 +8,10 @@ English documentation: [README.md](./README.md)
 
 | 能力 | 说明 |
 | --- | --- |
-| 单聊（C2C）收发 | `C2C_MESSAGE_CREATE` 适配为 Bub `ChannelMessage`；被动文本 / markdown 回复 |
+| 单聊（C2C）收发 | `C2C_MESSAGE_CREATE` 适配为 Bub `ChannelMessage`；被动文本 / markdown / 富媒体回复 |
 | 群聊收发 | `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE`；支持全量消息模式，payload 携带 `was_mentioned` / `sender_role` |
 | 群主动消息 | 被动回复不可用时兜底主动发送（`active_messages`，需群管理员在 QQ 客户端授权） |
-| 回复模式与选择性沉默 | `reply_mode: direct`（默认）直通转发模型最终文本、`<no_reply/>` 哨兵表示沉默；`reply_mode: tool` 注册原生 `qq.send` 工具，模型调用即回复、不调用即沉默（见「回复模式」） |
+| 回复模式与选择性沉默 | `reply_mode: tool`（默认）注册原生 `qq.send` 工具，模型调用即回复、不调用即沉默；`direct` 直通转发最终文本、`<no_reply/>` 表示沉默（见「回复模式」） |
 | 引用与聊天记录 | 解析 `msg_elements`，将引用消息 / 合并转发内容以 `quoted_messages` 传给模型 |
 | 接收模式 | **webhook** 或 **websocket** 二选一（QQ 平台侧互斥）；含 ed25519 验签与断线重连 |
 | 安全防护 | 用户/群白名单、按角色门控的逗号命令、按场景工具策略、LLM 频控、审计日志（见「安全」） |
@@ -153,14 +153,16 @@ QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 
 | `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | 入站消息之后尝试被动回复的时间窗口（秒） |
 | `active_messages` | `BUB_QQ_ACTIVE_MESSAGES` | `false` | 无法被动回复时改发群主动消息（不带 `msg_id`）；需要群管理员在 QQ 客户端允许机器人主动发言 |
 | `passive_replies_per_msg_id` | `BUB_QQ_PASSIVE_REPLIES_PER_MSG_ID` | `4` | 每条入站 `msg_id` 的被动回复本地上限；超出后降级为主动消息（若已开启）或跳过 |
-| `reply_mode` | `BUB_QQ_REPLY_MODE` | `direct` | 模型输出如何到达 QQ：`direct` 直通转发最终文本（输出 `<no_reply/>` 表示沉默）；`tool` 关闭直通转发并注册 `qq.send` 工具（见「回复模式」） |
+| `reply_mode` | `BUB_QQ_REPLY_MODE` | `tool` | 模型输出如何到达 QQ：`tool`（默认）关闭直通转发并注册 `qq.send` 工具；`direct` 直通转发最终文本（输出 `<no_reply/>` 表示沉默）（见「回复模式」） |
 | `state_file` | `BUB_QQ_STATE_FILE` | 空 | 持久化平台开关状态（主动消息授权、群 claw_cfg）的 JSON 文件；留空使用 `<bub home>/qq/state.json` |
 | `admin_users` | `BUB_QQ_ADMIN_USERS` | 空 | 逗号分隔的用户 openid，在所有场景拥有完整的逗号命令与工具权限 |
 | `allow_users` | `BUB_QQ_ALLOW_USERS` | 空 | 逗号分隔的 C2C 白名单；设置后其他用户的私聊消息会被丢弃 |
 | `allow_groups` | `BUB_QQ_ALLOW_GROUPS` | 空 | 逗号分隔的群白名单；设置后其他群的消息会被丢弃 |
+| `exec_approval` | `BUB_QQ_EXEC_APPROVAL` | `true` | 群内 `restricted` 工具、授权逗号命令或工作区越界时发送固定审批键盘。群主/管理员也要审批。C2C 仍直接执行/拒绝 |
 | `group_tool_policy` | `BUB_QQ_GROUP_TOOL_POLICY` | `restricted` | 群会话工具策略：`open` / `restricted`（禁用 `bash*`、`fs.write`、`fs.edit`、`subagent`）/ `locked`（禁用全部工具） |
 | `c2c_tool_policy` | `BUB_QQ_C2C_TOOL_POLICY` | `open` | C2C 会话工具策略，取值同 `group_tool_policy` |
 | `denied_tools` | `BUB_QQ_DENIED_TOOLS` | 空 | `restricted` 策略下额外禁用的工具名 glob，逗号分隔，如 `web.fetch,tape.*` |
+| `workspace_jail` | `BUB_QQ_WORKSPACE_JAIL` | `true` | 拒绝解析到 Bub 工作区（启动时 pwd）之外的文件/shell 参数和逗号命令；群主/管理员仍绕过工具策略，但不绕过此边界。入站附件存到 `<workspace>/inbox/`；若 cwd 是 `/`、家目录或不可写，则改写到 `<bub home>/qq/inbox/` |
 | `llm_rate_limit_per_minute` | `BUB_QQ_LLM_RATE_LIMIT_PER_MINUTE` | `0` | 每发送者在每个会话内每分钟的 LLM 调用上限；`0` 表示不限 |
 | `llm_rate_limit_notice` | `BUB_QQ_LLM_RATE_LIMIT_NOTICE` | `请求过于频繁，请稍后再试。` | 触发频控时回复的文本 |
 | `websocket_intents` | `BUB_QQ_WEBSOCKET_INTENTS` | `1 << 25` | WebSocket identify intents（`GROUP_AND_C2C_EVENT`） |
@@ -192,13 +194,13 @@ export BUB_QQ_RECEIVE_MODE=websocket
 
 `reply_mode` 决定模型输出如何变成 QQ 消息，以及同样重要的——模型如何保持沉默（例如群聊中未被 @ 且无话可说时）。用 opt-in/opt-out 的语言说：`direct` 是 **opt-out**（默认回复，模型输出哨兵显式退出本轮）；`tool` 是 **opt-in**（默认沉默，模型调用发送工具显式选择回复——与 Bub 其他通道的契约一致）。两种模式共享同一条发送链路（被动 `msg_id`/`msg_seq` 定位、去重、markdown 回退、主动消息兜底），并会按模式向 system prompt 注入一段 `<qq_response_instruct>`，让模型明确当前契约。
 
-### `direct`（默认）
+### `tool`（默认）
 
-模型的最终文本原样转发到聊天——送达不依赖模型调用任何东西。需要沉默时，模型输出 `<no_reply/>`，channel 将其吞掉（日志记 `qq.send skip_no_reply`），不发送任何内容。泄漏的模型特殊 token（`<|eos|>`、`<|im_end|>` 等）会从出站文本首尾剥离；输出仅含此类 token 时同样按沉默处理。当所配模型的工具调用可靠性未知时推荐此模式：失败方向是「多发一条」，绝不会「丢一条」。
+关闭直通转发（模型输出被路由到 `null` 通道丢弃），改为注册原生 `qq.send` 工具。模型调用 `qq.send` 传入消息文本即回复（可选 `media_url` / `file_type` 发原生富媒体）——`msg_id`/`msg_seq` 在插件内部解析，模型不接触协议字段——不调用即沉默。按钮不由模型生成。失败方向：模型忘记调用工具时回复会静默丢失。
 
-### `tool`
+### `direct`
 
-关闭直通转发（模型输出被路由到 `null` 通道丢弃），改为注册原生 `qq.send` 工具。模型调用 `qq.send` 传入消息文本即回复——`msg_id`/`msg_seq` 在插件内部解析，模型不接触协议字段——不调用即沉默。这与 Bub 原生的 channel 契约一致，且天然支持一轮多条消息。失败方向相反：模型忘记调用工具时回复会静默丢失，请在信任所配模型工具调用能力时使用。
+模型的最终文本原样转发到聊天——送达不依赖模型调用任何东西。需要沉默时，模型输出 `<no_reply/>`，channel 将其吞掉（日志记 `qq.send skip_no_reply`），不发送任何内容。泄漏的模型特殊 token（`<|eos|>`、`<|im_end|>` 等）会从出站文本首尾剥离；输出仅含此类 token 时同样按沉默处理。当所配模型的工具调用可靠性未知时可改回此模式：失败方向是「多发一条」，绝不会「丢一条」。`direct` 下不能发 `media_url`。
 
 `qq.send` 不受工具策略（`group_tool_policy` / `c2c_tool_policy` / `denied_tools`）限制：它就是回复路径本身，direct 模式下发送回复从来不受门控。
 
@@ -212,16 +214,17 @@ export BUB_QQ_RECEIVE_MODE=websocket
 插件为公开聊天场景内置了多层 fail-closed 防护：
 
 1. **白名单** —— 设置 `allow_users` / `allow_groups` 后，名单外的消息在进入模型之前即被丢弃。
-2. **逗号命令门控** —— 以 `,` 开头的入站文本只对授权发送者生效：群聊要求平台上报的 `member_role` 为 `owner` / `admin`，或发送者在 `admin_users` 中；私聊仅 `admin_users` 可用。其他人的 `,` 消息按普通文本转发给模型。
-3. **工具策略** —— `before_tool_call` hook 按场景拒绝危险工具。群会话默认 `restricted`（禁用 `bash*`、`fs.write`、`fs.edit`、`subagent`）；私聊默认 `open`。第 2 条中的授权发送者不受策略限制。
-4. **频控** —— `before_llm_call` hook 按「发送者 + 会话」限制每分钟 LLM 调用次数（`llm_rate_limit_per_minute`），超限时用 `llm_rate_limit_notice` 短路本次调用。
-5. **审计日志** —— `after_llm_call` / `after_tool_call` hook 输出 `qq.audit.llm` / `qq.audit.tool` 日志，包含会话、发送者、角色、工具/模型、耗时与错误类型。
+2. **逗号命令门控** —— 以 `,` 开头的入站文本只对授权发送者生效：群聊要求平台上报的 `member_role` 为 `owner` / `admin`，或发送者在 `admin_users` 中；私聊仅 `admin_users` 可用。其他人的 `,` 消息按普通文本转发给模型。群内默认还要经过 `exec_approval` 键盘，授权发送者也不能直接执行（含 `,tape.info`）；jail 放行路径不等于许可。
+3. **工具策略** —— `before_tool_call` hook 按场景拒绝危险工具。群会话默认 `restricted`（禁用 `bash*`、`fs.write`、`fs.edit`、`subagent`）；私聊默认 `open`。第 2 条中的授权发送者不受策略限制。群内触发 `restricted` 工具、授权逗号命令或工作区越界时默认弹出固定审批键盘（`exec_approval`），群主/管理员也不绕过；由群主/管理员/`admin_users` 点击后插件代跑该次调用（逗号命令走真实 session tape）。
+4. **工作区（pwd）** —— 启动 `bub gateway` 时的进程工作目录就是工作区。`fs.*` / `bash` / `qq.send(media_path=...)` 以及逗号命令里的路径默认不得越出该目录（`workspace_jail`，群主/管理员也不能绕过）。入站附件下载到 `<pwd>/inbox/<message_id>/`；从 `/` 或家目录启动时改写到 `~/.bub/qq/inbox/`。system prompt 的 `<qq_workspace>` 和入站 JSON 的 `workspace` 字段都会带上该路径。
+5. **频控** —— `before_llm_call` hook 按「发送者 + 会话」限制每分钟 LLM 调用次数（`llm_rate_limit_per_minute`），超限时用 `llm_rate_limit_notice` 短路本次调用。
+6. **审计日志** —— `after_llm_call` / `after_tool_call` hook 输出 `qq.audit.llm` / `qq.audit.tool` 日志，包含会话、发送者、角色、工具/模型、耗时与错误类型。
 
 注意：不做任何配置时，私聊里的逗号命令不可用（fail-closed）。请把自己的 openid 加入 `admin_users` 以保留命令权限。
 
 ### 运维逗号命令
 
-插件内置了对模型不可见（`agent_use=False`）、仅授权发送者可用的逗号命令：
+插件内置了对模型不可见（`agent_use=False`）、仅授权发送者可请求的逗号命令。群内仍要经过审批键盘：
 
 | 命令 | 说明 |
 | --- | --- |
@@ -236,6 +239,16 @@ QQ 是 channel 监听面。插件安装并配置完成后启动 gateway：
 ```bash
 bub gateway
 ```
+
+工作区就是启动时的 pwd。建议先准备一个专用目录，再在里面启动，这样附件会直接落在该目录的 `inbox/` 下，而不会再套一层 `qq/`：
+
+```bash
+mkdir -p ~/Documents/bub-qq-work
+cd ~/Documents/bub-qq-work
+bub gateway
+```
+
+如果从 `/` 或家目录启动（或当前目录不可写），插件会把附件改写到 `~/.bub/qq/inbox/`，避免在系统根目录散落文件。jail（`fs` / `bash` 不得越界）仍然以启动时的 pwd 为准。
 
 webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/path），并在 QQ 机器人后台登记回调。websocket 模式则需确保后台**没有**被成功配置的 webhook 独占。
 
@@ -252,7 +265,7 @@ webhook 模式需要将公网 HTTPS 地址指向内嵌服务（上表 host/port/
 | 入站事件 | `C2C_MESSAGE_CREATE`、`GROUP_AT_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` |
 | 群聊唤醒 | 收到的群消息一律 `is_active=true`；消息范围由 QQ 客户端群管理员设置 |
 | 命令消息 | 以 `,` 开头的入站文本仅对授权发送者转成 Bub `kind=command`（见「安全」），其他人按普通文本处理 |
-| 出站 | 文本（`msg_type = 0`），或在回复看起来像 markdown 时发送 markdown（`msg_type = 2`）；**优先被动回复**（`msg_id` + 插件内部管理的 `msg_seq`），群聊可选**主动消息兜底**（`active_messages`，仅纯文本） |
+| 出站 | 默认 `qq.send`：文本 / markdown（`msg_type = 0/2`）、富媒体（`msg_type = 7`；插件先下载 `media_url` 再分片上传，或 workspace 本地 `media_path`）；**优先被动回复**（`msg_id` + 插件内部管理的 `msg_seq`），群聊可选**主动消息兜底**（`active_messages`，仅纯文本；富媒体不走主动路径） |
 | 被动窗口 | 最近一条入站时间超过 60 分钟后停止被动回复；群聊在开启主动消息时降级为主动发送 |
 | 主动授权 | `GROUP_MSG_RECEIVE` / `GROUP_MSG_REJECT`（及 C2C 对应事件）按群/用户持久化；管理员明确拒绝后跳过主动发送 |
 | Debounce | `needs_debounce = true` |
@@ -271,6 +284,10 @@ C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21
 - `date`
 - `attachments`（如有）
 - `quoted_messages`（如有：来自 `msg_elements` 的引用消息 / 合并转发聊天记录，含 `message`、可选 `sender_name` 与嵌套 `messages`）
+- `message_type`（0=文本，3=结构化卡片，101/102/103=引用或聊天记录）
+- `ark_data`（`message_type=3` 时的卡片数据）
+- `workspace`（当前 Bub 工作区绝对路径，即启动时 pwd）
+- 入站附件在 `attachments[].local_path`（下载到 `inbox/<message_id>/`，不安全根则改写到 `~/.bub/qq/inbox/`）
 
 `direct` 模式下普通回复应直接返回最终文本，由 Bub outbound 路由调用 `QQChannel.send`；`tool` 模式下通过 `qq.send` 工具回复。两种模式下 `msg_seq` 都由插件内部管理——不要自行构造协议字段。
 
@@ -285,6 +302,10 @@ C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21
 - webhook 请求验签（`X-Signature-Ed25519`、`X-Signature-Timestamp`）
 - WebSocket 接收路径（重连 / resume，可选分片）
 - C2C / 群聊入站适配、`msg_id` 去重、60 分钟被动文本或 markdown 回复
+- `qq.send` 富媒体：先本机下载 `media_url`（或使用 `media_path`），再分片上传并以 `msg_type = 7` 发送（单聊/群聊隔离；仅被动窗口）
+- 工作区即启动时 pwd：文件/shell 默认不得越界；入站附件落到 `inbox/`（`/` 或家目录则改写到 `~/.bub/qq/`）
+- `qq.send(media_path=...)` 工作区内本地文件分片上传（出工作区拒绝）
+- 插件自有消息按钮（固定模板）；`INTERACTION_CREATE` type 11/12 先 PUT 再入站
 - 群聊文本收发；消息范围由 QQ 客户端群管理员控制
 - 同一 `session_id + msg_id + msg_seq` 的内存发送幂等
 - OpenAPI 错误暴露（HTTP 状态、平台业务码 `code` / `err_code`、响应头或响应体中的 trace_id）及错误目录元数据
@@ -297,8 +318,9 @@ C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21
 
 ### 尚未支持
 
-- QQ 频道（Guild）以及富媒体收发
-- 除验证、基础 `{"op":12}` 确认、C2C/群消息、消息开关事件、交互查询/变更外的更广 webhook 事件
+- QQ 频道（Guild）
+- 群成员危险操作的管理员按钮审批
+- 除验证、基础 `{"op":12}` 确认、C2C/群消息、消息开关事件、交互查询/变更、按钮/菜单点击外的更广 webhook 事件
 - C2C 主动推送（平台已于 2025-04-21 停止提供）
 - 群主动消息里的 markdown（需报备模板，主动路径仅发纯文本）
 - 启动后进程内动态分片再平衡
@@ -325,7 +347,8 @@ C2C 保持仅被动回复：官方文档写明 C2C 主动推送已于 2025-04-21
 - `C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` 所属 intent：`GROUP_AND_C2C_EVENT`（`1 << 25`）
 - 当前使用的 `C2C_MESSAGE_CREATE.d` 字段：`id`、`author.user_openid`、`content`、`timestamp`、`attachments`
 - 当前使用的群事件 `d` 字段：`id`、`group_openid`、`author.member_openid`、`content`、`timestamp`、`mentions`、`attachments`
-- 群聊发送：`POST /v2/groups/{group_openid}/messages`，body 与 C2C 相同（`msg_id`、`msg_seq`，以及 `content` + `msg_type = 0` 或 `markdown.content` + `msg_type = 2`）
+- 群聊发送：`POST /v2/groups/{group_openid}/messages`，body 与 C2C 相同（`msg_id`、`msg_seq`，以及 `content` + `msg_type = 0`、`markdown.content` + `msg_type = 2`，或 `media.file_info` + `msg_type = 7`）
+- 富媒体上传：本机分片（`upload_prepare` / `upload_part_finish` / `files` 用 `upload_id` 合并）再 `msg_type = 7`；单聊与群聊文件不能混用
 - WebSocket 关闭码 `4914` / `4915` 视为致命；`4006`–`4009`、`4900`–`4913` 等视为可重连
 
 ## 官方文档

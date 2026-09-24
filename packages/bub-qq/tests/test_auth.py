@@ -364,6 +364,118 @@ def test_openapi_posts_group_markdown_message() -> None:
     asyncio.run(_run())
 
 
+def test_openapi_posts_c2c_file_and_media_message() -> None:
+    async def _run() -> None:
+        captured: list[dict[str, object]] = []
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            captured.append({"path": request.url, "json": request.json})
+            if str(request.url).endswith("/files"):
+                return FakeResponse(
+                    status=200,
+                    payload={"file_uuid": "uuid-1", "file_info": "FILEINFO", "ttl": 300},
+                )
+            return FakeResponse(status=200, payload={"id": "media-1"})
+
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
+            )
+
+        provider = QQTokenProvider(
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+            client=FakeTokenClient(token_handler),
+        )
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+
+        uploaded = await openapi.post_c2c_file(
+            openid="user-openid",
+            file_type=1,
+            url="https://example.com/pic.png",
+            file_name="pic.png",
+        )
+        sent = await openapi.post_c2c_media_message(
+            openid="user-openid",
+            file_info="FILEINFO",
+            msg_id="message-1",
+            msg_seq=1,
+        )
+
+        assert uploaded["file_info"] == "FILEINFO"
+        assert sent["id"] == "media-1"
+        assert captured[0] == {
+            "path": "/v2/users/user-openid/files",
+            "json": {
+                "file_type": 1,
+                "url": "https://example.com/pic.png",
+                "srv_send_msg": False,
+                "file_name": "pic.png",
+            },
+        }
+        assert captured[1] == {
+            "path": "/v2/users/user-openid/messages",
+            "json": {
+                "msg_type": 7,
+                "media": {"file_info": "FILEINFO"},
+                "msg_id": "message-1",
+                "msg_seq": 1,
+            },
+        }
+
+    asyncio.run(_run())
+
+
+def test_openapi_posts_group_file() -> None:
+    async def _run() -> None:
+        captured: dict[str, object] = {}
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            captured["path"] = request.url
+            captured["json"] = request.json
+            return FakeResponse(
+                status=200, payload={"file_uuid": "uuid-2", "file_info": "GFILE"}
+            )
+
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200,
+                payload={"access_token": "abc", "expires_in": 7200},
+            )
+
+        provider = QQTokenProvider(
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+            client=FakeTokenClient(token_handler),
+        )
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+
+        payload = await openapi.post_group_file(
+            group_openid="group-openid",
+            file_type=2,
+            url="https://example.com/clip.mp4",
+        )
+
+        assert payload["file_info"] == "GFILE"
+        assert captured["path"] == "/v2/groups/group-openid/files"
+        assert captured["json"] == {
+            "file_type": 2,
+            "url": "https://example.com/clip.mp4",
+            "srv_send_msg": False,
+        }
+
+    asyncio.run(_run())
+
+
 def test_openapi_error_exposes_trace_id_and_business_code() -> None:
     async def _run() -> None:
         async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:

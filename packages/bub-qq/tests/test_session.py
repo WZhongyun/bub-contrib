@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from bub_qq.outbound.send_flow import next_msg_seq
+from bub_qq.outbound.send_flow import release_unused_msg_seq
 from bub_qq.session import BoundedDict
 from bub_qq.session import QQInboundDeduper
 from bub_qq.session import QQSendRecord
@@ -45,6 +47,20 @@ def test_session_state_send_records_are_bounded() -> None:
 
     assert len(state.send_records) == 2
     assert ("session", "msg-0", "hash") not in state.send_records
+
+
+def test_release_unused_msg_seq_only_rolls_back_latest() -> None:
+    state = QQSessionState()
+    first = next_msg_seq(state, "session", "msg")
+    second = next_msg_seq(state, "session", "msg")
+    assert first == 1
+    assert second == 2
+
+    release_unused_msg_seq(state, "session", "msg", 1)
+    assert state.latest_sequence_by_session_and_msg_id[("session", "msg")] == 2
+
+    release_unused_msg_seq(state, "session", "msg", 2)
+    assert state.latest_sequence_by_session_and_msg_id[("session", "msg")] == 1
 
 
 def test_inbound_deduper_marks_repeats_and_evicts() -> None:

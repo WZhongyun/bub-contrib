@@ -150,6 +150,21 @@ def test_group_inbound_parses_at_message_as_active() -> None:
     )
 
 
+def test_group_inbound_includes_message_type_and_ark_data() -> None:
+    payload = _payload()
+    data = payload["d"]
+    assert isinstance(data, dict)
+    data["message_type"] = 3
+    data["ark_data"] = {"template_id": 23}
+
+    parsed = _service(_state()).parse_inbound(payload)
+
+    assert parsed is not None
+    content = json.loads(parsed[1].content)
+    assert content["message_type"] == 3
+    assert content["ark_data"] == {"template_id": 23}
+
+
 def test_group_inbound_unmentioned_message_is_still_active() -> None:
     state = _state()
     service = _service(state)

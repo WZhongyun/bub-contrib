@@ -21,7 +21,13 @@ from .security import QQ_CONTEXT_KEY
 from .security import QQ_STATE_KEY
 from .security import REPLY_TOOL_NAME
 from .security import SlidingWindowRateLimiter
+from .approval import consume_once_grant
+from .approval import has_always_grant
+from .approval import maybe_request_approval
 from .security import evaluate_tool_call
+from .workspace import artifact_root
+from .workspace import tool_escapes_workspace
+from .workspace import workspace_from_state
 
 CHANNEL_NAME = "qq"
 RECEIVE_MODES = ["webhook", "websocket"]
@@ -41,9 +47,9 @@ This conversation is on the QQ channel ($qq), which overrides the generic channe
 TOOL_REPLY_PROMPT = """\
 <qq_response_instruct>
 This conversation is on the QQ channel ($qq), which overrides the generic channel guidance above:
-- To reply, call the qq.send tool with the message text. Reply targeting (msg_id/msg_seq) is handled internally; never construct protocol fields yourself.
+- To reply, call the qq.send tool with the message text or media_url / media_path for native media. The plugin downloads media_url itself and uploads the file; do not bash/curl it. To @ a group member, pass at_user_ids with their sender_id. Reply targeting (msg_id/msg_seq) is handled internally; never construct protocol fields yourself.
 - Your plain final reply text is NOT delivered to the chat.
-- If no response is needed (apply the response criteria above), do not call qq.send.
+- If no response is needed, do not call qq.send. After qq.send succeeds, stop; do not qq.send <no_reply/>.
 </qq_response_instruct>"""
 
 _rate_limiter: SlidingWindowRateLimiter | None = None
@@ -132,48 +138,83 @@ def system_prompt(prompt: Any, state: TurnState) -> str | None:
     if qq_state is None:
         return None
     config = bub.ensure_config(QQConfig)
+    workspace = workspace_from_state(state)
+    inbox = artifact_root(workspace) / "inbox"
+    jail = (
+        f"<qq_workspace>\nWorking directory: {workspace}\n"
+        "File and shell tools must stay inside this directory. "
+        f"Inbound attachments are saved under {inbox}/.\n"
+        "</qq_workspace>"
+    )
     if config.reply_mode == "tool":
-        return TOOL_REPLY_PROMPT
-    return DIRECT_REPLY_PROMPT
+        return f"{TOOL_REPLY_PROMPT}\n{jail}"
+    return f"{DIRECT_REPLY_PROMPT}\n{jail}"
 
 
 @hookimpl
 def before_llm_call(
     request: LlmCallRequest, state: TurnState
-) -> LlmCallDecision | None:
+) -> LlmCallRequest | LlmCallDecision | None:
+    del request
     qq_state = _qq_state(state)
     if qq_state is None:
         return None
     config = bub.ensure_config(QQConfig)
     limiter = _get_rate_limiter(config)
-    if limiter is None:
-        return None
-    key = f"{qq_state.get('session_id')}|{qq_state.get('sender_id')}"
-    if limiter.allow(key):
-        return None
-    logger.warning(
-        "qq.security.llm_rate_limited session_id={} sender_id={}",
-        qq_state.get("session_id"),
-        qq_state.get("sender_id"),
-    )
-    return LlmCallDecision.finish(config.llm_rate_limit_notice)
+    if limiter is not None:
+        key = f"{qq_state.get('session_id')}|{qq_state.get('sender_id')}"
+        if not limiter.allow(key):
+            logger.warning(
+                "qq.security.llm_rate_limited session_id={} sender_id={}",
+                qq_state.get("session_id"),
+                qq_state.get("sender_id"),
+            )
+            return LlmCallDecision.finish(config.llm_rate_limit_notice)
+    return None
 
 
 @hookimpl
-def before_tool_call(call: ToolCall, state: TurnState) -> ToolCallDecision | None:
+async def before_tool_call(
+    call: ToolCall, state: TurnState
+) -> ToolCallDecision | None:
     qq_state = _qq_state(state)
     if qq_state is None:
         return None
     config = bub.ensure_config(QQConfig)
+    session_id = str(qq_state.get("session_id") or "")
+    sender_id = str(qq_state.get("sender_id") or "")
+    if consume_once_grant(session_id, sender_id, call.tool) or has_always_grant(
+        session_id, sender_id, call.tool
+    ):
+        return None
+    approval = await maybe_request_approval(call, state, config)
+    if approval is not None:
+        return approval
+    jail_reason = (
+        tool_escapes_workspace(call, workspace_from_state(state))
+        if config.workspace_jail
+        else None
+    )
+    if jail_reason is not None:
+        logger.warning(
+            "qq.security.tool_denied tool={} session_id={} sender_id={} role={} reason={}",
+            call.tool,
+            qq_state.get("session_id"),
+            qq_state.get("sender_id"),
+            qq_state.get("sender_role"),
+            jail_reason,
+        )
+        return ToolCallDecision.deny(jail_reason)
     reason = evaluate_tool_call(config, qq_state, call.tool)
     if reason is None:
         return None
     logger.warning(
-        "qq.security.tool_denied tool={} session_id={} sender_id={} role={}",
+        "qq.security.tool_denied tool={} session_id={} sender_id={} role={} reason={}",
         call.tool,
         qq_state.get("session_id"),
         qq_state.get("sender_id"),
         qq_state.get("sender_role"),
+        reason,
     )
     return ToolCallDecision.deny(reason)
 

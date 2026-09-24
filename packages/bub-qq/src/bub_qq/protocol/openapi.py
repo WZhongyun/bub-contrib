@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 from typing import Protocol
@@ -96,7 +97,9 @@ class QQOpenAPI:
                 payload,
                 default_message="qq openapi async success requires follow-up handling",
             )
-        if response.status == 204:
+        if response.status == 204 or payload is None:
+            return {}
+        if isinstance(payload, str) and not payload.strip():
             return {}
         if not isinstance(payload, dict):
             raise QQOpenAPIError(
@@ -161,12 +164,14 @@ class QQOpenAPI:
         content: str,
         msg_id: str,
         msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._post_text_message(
             path=f"/v2/users/{openid}/messages",
             content=content,
             msg_id=msg_id,
             msg_seq=msg_seq,
+            keyboard=keyboard,
         )
 
     async def post_c2c_markdown_message(
@@ -176,12 +181,14 @@ class QQOpenAPI:
         content: str,
         msg_id: str,
         msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._post_markdown_message(
             path=f"/v2/users/{openid}/messages",
             content=content,
             msg_id=msg_id,
             msg_seq=msg_seq,
+            keyboard=keyboard,
         )
 
     async def post_group_text_message(
@@ -191,12 +198,14 @@ class QQOpenAPI:
         content: str,
         msg_id: str,
         msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._post_text_message(
             path=f"/v2/groups/{group_openid}/messages",
             content=content,
             msg_id=msg_id,
             msg_seq=msg_seq,
+            keyboard=keyboard,
         )
 
     async def post_group_markdown_message(
@@ -206,12 +215,14 @@ class QQOpenAPI:
         content: str,
         msg_id: str,
         msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._post_markdown_message(
             path=f"/v2/groups/{group_openid}/messages",
             content=content,
             msg_id=msg_id,
             msg_seq=msg_seq,
+            keyboard=keyboard,
         )
 
     async def post_group_active_text_message(
@@ -231,6 +242,161 @@ class QQOpenAPI:
             json_body={"content": content, "msg_type": 0},
         )
 
+    async def post_c2c_file(
+        self,
+        *,
+        openid: str,
+        file_type: int,
+        url: str | None = None,
+        file_name: str | None = None,
+        upload_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._post_file(
+            path=f"/v2/users/{openid}/files",
+            file_type=file_type,
+            url=url,
+            file_name=file_name,
+            upload_id=upload_id,
+        )
+
+    async def post_group_file(
+        self,
+        *,
+        group_openid: str,
+        file_type: int,
+        url: str | None = None,
+        file_name: str | None = None,
+        upload_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._post_file(
+            path=f"/v2/groups/{group_openid}/files",
+            file_type=file_type,
+            url=url,
+            file_name=file_name,
+            upload_id=upload_id,
+        )
+
+    async def post_c2c_upload_prepare(
+        self, *, openid: str, **body: Any
+    ) -> dict[str, Any]:
+        return await self.post(f"/v2/users/{openid}/upload_prepare", json_body=body)
+
+    async def post_group_upload_prepare(
+        self, *, group_openid: str, **body: Any
+    ) -> dict[str, Any]:
+        return await self.post(
+            f"/v2/groups/{group_openid}/upload_prepare", json_body=body
+        )
+
+    async def post_c2c_upload_part_finish(
+        self, *, openid: str, **body: Any
+    ) -> dict[str, Any]:
+        return await self.post(
+            f"/v2/users/{openid}/upload_part_finish", json_body=body
+        )
+
+    async def post_group_upload_part_finish(
+        self, *, group_openid: str, **body: Any
+    ) -> dict[str, Any]:
+        return await self.post(
+            f"/v2/groups/{group_openid}/upload_part_finish", json_body=body
+        )
+
+    async def put_url(self, url: str, data: bytes) -> None:
+        """HTTP PUT a chunk to a presigned COS URL (absolute)."""
+
+        session = await self._get_session()
+        async with session.put(
+            url,
+            data=data,
+            headers={"Content-Type": "application/octet-stream"},
+        ) as response:
+            wrapped = _QQResponse(
+                status=response.status,
+                reason=response.reason or "",
+                headers=dict(response.headers),
+                payload=await _maybe_json(response),
+            )
+            if wrapped.status < 200 or wrapped.status >= 300:
+                raise build_openapi_error(wrapped, wrapped.payload)
+
+    async def post_c2c_media_message(
+        self,
+        *,
+        openid: str,
+        file_info: str,
+        msg_id: str,
+        msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._post_media_message(
+            path=f"/v2/users/{openid}/messages",
+            file_info=file_info,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+            keyboard=keyboard,
+        )
+
+    async def post_group_media_message(
+        self,
+        *,
+        group_openid: str,
+        file_info: str,
+        msg_id: str,
+        msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._post_media_message(
+            path=f"/v2/groups/{group_openid}/messages",
+            file_info=file_info,
+            msg_id=msg_id,
+            msg_seq=msg_seq,
+            keyboard=keyboard,
+        )
+
+    async def _post_file(
+        self,
+        *,
+        path: str,
+        file_type: int,
+        url: str | None,
+        file_name: str | None,
+        upload_id: str | None = None,
+    ) -> dict[str, Any]:
+        json_body: dict[str, Any] = {
+            "file_type": file_type,
+            "srv_send_msg": False,
+        }
+        if url:
+            json_body["url"] = url
+        if upload_id:
+            json_body["upload_id"] = upload_id
+        if file_name:
+            json_body["file_name"] = file_name
+        return await self.post(path, json_body=json_body)
+
+    async def _post_media_message(
+        self,
+        *,
+        path: str,
+        file_info: str,
+        msg_id: str,
+        msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self.post(
+            path,
+            json_body=_with_keyboard(
+                {
+                    "msg_type": 7,
+                    "media": {"file_info": file_info},
+                    "msg_id": msg_id,
+                    "msg_seq": msg_seq,
+                },
+                keyboard,
+            ),
+        )
+
     async def _post_text_message(
         self,
         *,
@@ -238,15 +404,19 @@ class QQOpenAPI:
         content: str,
         msg_id: str,
         msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self.post(
             path,
-            json_body={
-                "content": content,
-                "msg_type": 0,
-                "msg_id": msg_id,
-                "msg_seq": msg_seq,
-            },
+            json_body=_with_keyboard(
+                {
+                    "content": content,
+                    "msg_type": 0,
+                    "msg_id": msg_id,
+                    "msg_seq": msg_seq,
+                },
+                keyboard,
+            ),
         )
 
     async def _post_markdown_message(
@@ -256,15 +426,19 @@ class QQOpenAPI:
         content: str,
         msg_id: str,
         msg_seq: int,
+        keyboard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self.post(
             path,
-            json_body={
-                "msg_type": 2,
-                "markdown": {"content": content},
-                "msg_id": msg_id,
-                "msg_seq": msg_seq,
-            },
+            json_body=_with_keyboard(
+                {
+                    "msg_type": 2,
+                    "markdown": {"content": content},
+                    "msg_id": msg_id,
+                    "msg_seq": msg_seq,
+                },
+                keyboard,
+            ),
         )
 
     async def put_interaction(
@@ -282,6 +456,14 @@ class QQOpenAPI:
             f"/interactions/{interaction_id}",
             json_body=json_body,
         )
+
+
+def _with_keyboard(
+    body: dict[str, Any], keyboard: dict[str, Any] | None
+) -> dict[str, Any]:
+    if keyboard:
+        body["keyboard"] = keyboard
+    return body
 
 
 class _QQResponse:
@@ -303,7 +485,8 @@ async def _maybe_json(response: aiohttp.ClientResponse) -> Any:
     body = await response.read()
     if not body:
         return None
+    text = body.decode(response.get_encoding() or "utf-8", errors="replace")
     try:
-        return await response.json()
-    except (aiohttp.ContentTypeError, ValueError):
-        return body.decode(response.get_encoding() or "utf-8", errors="replace")
+        return json.loads(text)
+    except ValueError:
+        return text

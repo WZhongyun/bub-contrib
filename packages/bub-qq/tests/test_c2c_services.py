@@ -161,6 +161,7 @@ def test_c2c_inbound_includes_quoted_messages_in_payload() -> None:
     assert content["quoted_messages"] == [
         {"message": "原始消息", "sender_name": "Bob"}
     ]
+    assert content["message_type"] == 103
 
 
 def test_c2c_inbound_service_drops_users_outside_allowlist() -> None:
@@ -513,8 +514,18 @@ def test_c2c_send_service_swallows_openapi_errors() -> None:
             )
         )
 
-        assert result is None
+        assert result == {
+            "status": "failed",
+            "error_code": 22009,
+            "error": "msg limit exceed",
+        }
         assert openapi.calls == 1
+        assert (
+            state.latest_sequence_by_session_and_msg_id.get(
+                ("qq:c2c:user-openid", "message-1"), 0
+            )
+            == 0
+        )
 
     asyncio.run(_run())
 

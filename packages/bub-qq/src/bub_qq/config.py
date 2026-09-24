@@ -63,12 +63,12 @@ class QQConfig(bub.Settings):
         ),
     )
     reply_mode: ReplyMode = Field(
-        default="direct",
+        default="tool",
         description=(
-            "How model output reaches QQ. 'direct' forwards the model's"
-            " final text as the reply (output exactly <no_reply/> to stay"
-            " silent). 'tool' disables direct forwarding and exposes the"
-            " qq.send tool instead; staying silent means not calling it."
+            "How model output reaches QQ. 'tool' (default) disables direct"
+            " forwarding and exposes the qq.send tool; staying silent means"
+            " not calling it. 'direct' forwards the model's final text as"
+            " the reply (output exactly <no_reply/> to stay silent)."
         ),
     )
     passive_replies_per_msg_id: int = Field(
@@ -115,13 +115,24 @@ class QQConfig(bub.Settings):
             " other groups are dropped. Empty allows every group."
         ),
     )
+    exec_approval: bool = Field(
+        default=True,
+        description=(
+            "When a group member's tool call is blocked by group_tool_policy, "
+            "or an authorized sender types a comma command, send a fixed admin "
+            "keyboard instead of running immediately. Group owners/admins also "
+            "go through approval (they may tap their own request). "
+            "Workspace-jail escapes are included. Does not apply to C2C; "
+            "locked policy still denies other tools."
+        ),
+    )
     group_tool_policy: ToolPolicy = Field(
         default="restricted",
         description=(
             "Tool policy for group sessions: 'open' allows all tools,"
-            " 'restricted' denies shell/file-write/subagent tools,"
-            " 'locked' denies every tool. Group owners/admins and"
-            " admin_users bypass the policy."
+            " 'restricted' queues shell/file-write/subagent tools for"
+            " approval, 'locked' denies every tool. With exec_approval,"
+            " owners/admins also confirm via the keyboard."
         ),
     )
     c2c_tool_policy: ToolPolicy = Field(
@@ -133,6 +144,16 @@ class QQConfig(bub.Settings):
         description=(
             "Extra comma-separated tool-name glob patterns denied under the"
             " 'restricted' policy, e.g. 'web.fetch,tape.*'."
+        ),
+    )
+    workspace_jail: bool = Field(
+        default=True,
+        description=(
+            "Refuse file/shell tool arguments and comma commands that resolve"
+            " outside the Bub workspace (process cwd / pwd). Privileged"
+            " senders still bypass tool-policy tiers, but not this jail."
+            " Inbound attachments are saved under <workspace>/inbox/"
+            " (or <bub home>/qq/inbox/ when cwd is /, $HOME, or unwritable)."
         ),
     )
     llm_rate_limit_per_minute: int = Field(
