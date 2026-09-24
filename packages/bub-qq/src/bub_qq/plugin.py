@@ -142,11 +142,18 @@ def system_prompt(prompt: Any, state: TurnState) -> str | None:
         return None
     config = bub.ensure_config(QQConfig)
     workspace = workspace_from_state(state)
-    inbox = artifact_root(workspace) / "inbox"
+    root = artifact_root(workspace)
     jail = (
         f"<qq_workspace>\nWorking directory: {workspace}\n"
-        "File and shell tools must stay inside this directory. "
-        f"Inbound attachments are saved under {inbox}/.\n"
+        "- File tools only work inside this directory; .env, .git/ and QQ state"
+        " files are always refused.\n"
+        "- Attachments are not downloaded automatically. When you need one, call"
+        " qq.fetch_attachment with its message_id and position; it is saved under"
+        f" {root / 'inbox'}/.\n"
+        f"- qq.send media_path only accepts files under {root / 'outbox'}/ or"
+        f" {root / 'inbox'}/.\n"
+        "- Shell and file writes are admin-only; an admin's shell command waits for"
+        " an approval tap and its result is posted to the chat, not returned to you.\n"
         "</qq_workspace>"
     )
     if config.reply_mode == "tool":

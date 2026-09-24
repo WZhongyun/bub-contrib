@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
+
+if TYPE_CHECKING:
+    from .protocol.models import QQAttachment
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -64,6 +67,10 @@ class QQSessionState:
         self.send_records: BoundedDict[tuple[str, str, str], QQSendRecord] = (
             BoundedDict(max_entries)
         )
+        # message_id -> (session_id, attachments), for on-demand download.
+        self.attachments_by_message_id: BoundedDict[
+            str, tuple[str, tuple[QQAttachment, ...]]
+        ] = BoundedDict(max_entries)
 
 
 class QQInboundDeduper:
@@ -85,7 +92,10 @@ def remember_session(
     session_id: str,
     message_id: str,
     timestamp: str | None,
+    attachments: tuple[QQAttachment, ...] = (),
 ) -> None:
     state.latest_message_id_by_session[session_id] = message_id
     if timestamp is not None:
         state.latest_timestamp_by_session[session_id] = timestamp
+    if attachments:
+        state.attachments_by_message_id[message_id] = (session_id, attachments)

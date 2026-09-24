@@ -18,6 +18,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
 
+import aiohttp
 import bub
 from bub.channels.message import ChannelMessage
 from bub.tools import ToolContext, tool
@@ -29,8 +30,16 @@ from .outbound.media import infer_file_type
 from .outbound.media import media_spec_from_args
 from .outbound.media import parse_at_user_ids
 from .outbound.media import resolve_media_path
+from .inbound.persist import download_to_path
+from .netguard import check_public_url
+from .netguard import download_allow_hosts
+from .netguard import guarded_session
 from .runtime import get_active_channel
 from .security import QQ_STATE_KEY, REPLY_TOOL_NAME
+from .workspace import MAX_INBOUND_DOWNLOAD_BYTES
+from .workspace import inbox_dir
+from .workspace import safe_filename
+from .workspace import workspace_from_state
 
 
 @tool(name=REPLY_TOOL_NAME, context=True)
@@ -151,6 +160,57 @@ def _format_failed_send(result: dict[str, object]) -> str:
         f"Not sent: QQ OpenAPI error code={code} {error}."
         " Do not retry with identical content."
     )
+
+
+@tool(name="qq.fetch_attachment", context=True)
+async def qq_fetch_attachment(
+    message_id: str, index: int = 0, *, context: ToolContext
+) -> str:
+    """Download one attachment of a message in this chat into inbox/.
+
+    Attachments are not downloaded automatically. Call this only when you
+    need the file's contents (pass the message_id and the attachment's
+    position, 0-based, from the inbound payload), then read it with
+    fs.read or forward it with qq.send media_path.
+    """
+
+    qq_state = context.state.get(QQ_STATE_KEY)
+    if not isinstance(qq_state, dict):
+        return "Not downloaded: only available inside QQ channel sessions."
+    channel = get_active_channel()
+    if channel is None:
+        return "Not downloaded: the QQ channel is not running in this process."
+    session_id = str(qq_state.get("session_id") or "")
+    record = channel.session_state.attachments_by_message_id.get(message_id)
+    # Only messages from this conversation: no reaching into other chats.
+    if record is None or record[0] != session_id:
+        return "Not downloaded: no attachments known for that message_id in this chat."
+    attachments = record[1]
+    if not 0 <= index < len(attachments):
+        return f"Not downloaded: index must be between 0 and {len(attachments) - 1}."
+    attachment = attachments[index]
+    if not attachment.url:
+        return "Not downloaded: that attachment has no download URL."
+    if attachment.size is not None and attachment.size > MAX_INBOUND_DOWNLOAD_BYTES:
+        return "Not downloaded: the attachment is larger than 200 MB."
+    workspace = workspace_from_state(context.state)
+    dest = inbox_dir(workspace, message_id) / safe_filename(
+        attachment.filename, attachment.url, index
+    )
+    if dest.is_file():
+        return f"Already downloaded: {dest}"
+    allow_hosts = download_allow_hosts()
+    try:
+        async with guarded_session(timeout=60, allow_hosts=allow_hosts) as session:
+            await download_to_path(
+                session,
+                attachment.url,
+                dest,
+                url_guard=lambda hop: check_public_url(hop, allow_hosts=allow_hosts),
+            )
+    except (OSError, aiohttp.ClientError, TimeoutError, ValueError) as exc:
+        return f"Not downloaded: {exc}"
+    return f"Downloaded to {dest} ({dest.stat().st_size} bytes)."
 
 
 @tool(name="qq.version", agent_use=False)

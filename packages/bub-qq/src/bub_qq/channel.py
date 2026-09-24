@@ -19,12 +19,14 @@ from .inbound.c2c import QQC2CInboundService
 from .inbound.group import GROUP_EVENTS
 from .inbound.group import QQGroupInboundService
 from .inbound.group import group_was_mentioned
+from .inbound.group import strip_mention_text
 from .inbound.interaction import ACK_INTERACTION_TYPES
 from .inbound.interaction import INTERACTION_QUERY
 from .inbound.interaction import INTERACTION_UPDATE
 from .inbound.interaction import build_claw_cfg
 from .inbound.interaction import build_interaction_channel_message
 from .inbound.interaction import extract_claw_cfg_update
+from .admins import AdminRegistry
 from .approval import PendingApproval
 from .approval import begin_approval_click
 from .approval import comma_command_to_call
@@ -82,6 +84,7 @@ class QQChannel(Channel):
         )
         self._policy = QQAccessPolicy.from_config(self._config)
         self._platform_store = QQPlatformStore(resolve_state_path(self._config))
+        self._admins = AdminRegistry(self._platform_store, self._config)
         self._workspace = Path.cwd().resolve()
         # In tool reply mode the model must reply through the qq.send tool,
         # so direct model output is routed to the "null" channel and dropped.
@@ -131,6 +134,8 @@ class QQChannel(Channel):
     async def start(self, stop_event: asyncio.Event | None) -> None:
         if not self._config.appid or not self._config.secret:
             raise RuntimeError("qq appid/secret is empty")
+        self._check_security_config()
+        self._admins.bootstrap_code()
 
         mode = self._normalize_receive_mode()
         if mode == "webhook":
@@ -233,6 +238,11 @@ class QQChannel(Channel):
             len(message.content),
             len(message.attachments),
         )
+        requester = Requester(scope="c2c", sender_id=message.user_openid)
+        if await self._handle_admin_command(
+            message.content, requester, channel_message
+        ):
+            return
         if channel_message.kind == "command" and not await self._admit_command(
             channel_message
         ):
@@ -253,11 +263,26 @@ class QQChannel(Channel):
             channel_message.is_active,
             len(message.content),
         )
+        requester = Requester(
+            scope="group",
+            sender_id=message.member_openid,
+            group_openid=message.group_openid,
+        )
+        if await self._handle_admin_command(
+            strip_mention_text(message.content, message.mentions),
+            requester,
+            channel_message,
+        ):
+            return
         if channel_message.kind == "command" and not await self._admit_command(
             channel_message
         ):
             return
         await self._on_receive(channel_message)
+
+    @property
+    def session_state(self) -> QQSessionState:
+        return self._session_state
 
     def _is_admin(self, requester: Requester) -> bool:
         return is_admin(self._config, requester)
@@ -472,6 +497,46 @@ class QQChannel(Channel):
             await self._on_receive(channel_message)
             return
         logger.info("qq.interaction.unhandled type={}", event_type)
+
+    def _check_security_config(self) -> None:
+        config = self._config
+        for removed, replacement in (
+            ("exec_approval", "group_shell"),
+            ("workspace_jail", "group_shell / shell_sandbox"),
+        ):
+            if getattr(config, removed, None) is not None:
+                logger.warning(
+                    "qq.config.removed option={} is ignored since 0.3.0; use {}",
+                    removed,
+                    replacement,
+                )
+        if config.c2c_access == "allow_users" and not config.allow_users.strip():
+            raise RuntimeError(
+                "qq c2c_access=allow_users needs a non-empty allow_users; an empty"
+                " list would open tools to every private-chat user"
+            )
+        if config.group_shell == "approval" and config.shell_sandbox == "none":
+            logger.warning(
+                "qq.security.shell_unsandboxed commands approved by admins run"
+                " directly on this host; run bub in a sandbox and set"
+                " shell_sandbox=external, or set group_shell=deny"
+            )
+        if config.shell_sandbox == "external":
+            logger.info(
+                "qq.security.shell_sandbox assuming bash runs in an external"
+                " sandbox; the plugin does not isolate commands"
+            )
+
+    async def _handle_admin_command(
+        self, text: str, requester: Requester, channel_message: ChannelMessage
+    ) -> bool:
+        """Answer ,qq.claim / ,qq.admins here; True when handled."""
+
+        reply = self._admins.handle(text, requester)
+        if reply is None:
+            return False
+        await send_notice(channel_message.session_id, channel_message.chat_id, reply)
+        return True
 
     def _normalize_receive_mode(self) -> str:
         mode = (self._config.receive_mode or "").strip().lower()

@@ -82,6 +82,7 @@ class QQGroupInboundService:
             session_id=channel_message.session_id,
             message_id=message.message_id,
             timestamp=message.timestamp,
+            attachments=message.attachments,
         )
         return message, channel_message
 

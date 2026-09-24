@@ -14,7 +14,7 @@ Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 | Reply modes & selective silence | `reply_mode: tool` (default) exposes a native `qq.send` tool so the model replies by calling it and stays silent by not calling it; `direct` forwards the model's final text and swallows `<no_reply/>` (see Reply modes) |
 | Quotes and chat records | `msg_elements` parsed into `quoted_messages` (quoted messages / merged-forward chat records) for the model |
 | Receive transport | **webhook** or **websocket** (mutually exclusive on the QQ platform side); ed25519 signature verification and reconnect included |
-| Security | User/group allowlists, role-gated comma commands, per-scope tool policy, LLM rate limiting, audit logs (see Security) |
+| Security | One Guard for every action: admin pairing (`,qq.claim`), per-resource rules, one-time shell approvals, protected files, public-only downloads, allowlists, rate limiting, audit logs (see Security) |
 | Persisted platform state | Active-message opt-ins (`*_MSG_RECEIVE` / `*_MSG_REJECT`) and group claw_cfg survive restarts |
 | Reliable sending | Inbound/outbound dedupe, `msg_seq` management, error catalog; async manual audit (304023/304024) treated as pending success |
 | Onboarding | `bub onboard` collects `appid` / `secret` / `receive_mode`; bundled skill resources under `src/skills/qq` |
@@ -154,15 +154,17 @@ Gateway start fails if `appid` / `secret` are empty, or if `receive_mode` is not
 | `active_messages` | `BUB_QQ_ACTIVE_MESSAGES` | `false` | Send proactive group messages (no `msg_id`) when a passive reply is impossible; requires the group admin to allow proactive messages in the QQ client |
 | `passive_replies_per_msg_id` | `BUB_QQ_PASSIVE_REPLIES_PER_MSG_ID` | `4` | Local cap of passive replies per inbound `msg_id`; beyond it the send falls back to an active message (when enabled) or is skipped |
 | `reply_mode` | `BUB_QQ_REPLY_MODE` | `tool` | How model output reaches QQ: `tool` (default) disables direct forwarding and exposes the `qq.send` tool; `direct` forwards the final text (output exactly `<no_reply/>` to stay silent) (see Reply modes) |
-| `state_file` | `BUB_QQ_STATE_FILE` | empty | JSON file persisting platform switches (active-message opt-ins, group claw_cfg); empty uses `<bub home>/qq/state.json` |
-| `admin_users` | `BUB_QQ_ADMIN_USERS` | empty | Comma-separated user openids with full comma-command and tool access in every scope |
+| `state_file` | `BUB_QQ_STATE_FILE` | empty | JSON file persisting registered admins and platform switches (active-message opt-ins, group claw_cfg); empty uses `<bub home>/qq/state.json` |
+| `admin_users` | `BUB_QQ_ADMIN_USERS` | empty | Admins, the only trusted senders. Entries are scoped identities (`c2c:<user_openid>`, `group:<group_openid>:<member_openid>`) or bare openids matching in any scope. Usually left empty and filled by `,qq.claim` (see Security) |
 | `allow_users` | `BUB_QQ_ALLOW_USERS` | empty | Comma-separated C2C allowlist; when set, C2C messages from anyone else are dropped |
 | `allow_groups` | `BUB_QQ_ALLOW_GROUPS` | empty | Comma-separated group allowlist; when set, messages from other groups are dropped |
-| `exec_approval` | `BUB_QQ_EXEC_APPROVAL` | `true` | Group `restricted` tools, authorized comma commands, and workspace-jail escapes send a fixed approval keyboard. Owners/admins are not exempt. C2C still runs/denies immediately |
-| `group_tool_policy` | `BUB_QQ_GROUP_TOOL_POLICY` | `restricted` | Tool policy for group sessions: `open` / `restricted` (denies `bash*`, `fs.write`, `fs.edit`, `subagent`) / `locked` (denies all tools) |
-| `c2c_tool_policy` | `BUB_QQ_C2C_TOOL_POLICY` | `open` | Tool policy for C2C sessions; same values as `group_tool_policy` |
+| `group_shell` | `BUB_QQ_GROUP_SHELL` | `approval` | Shell (`bash`) for admins: `approval` (an admin taps to confirm every command; no always-allow) or `deny`. Non-admins never get a shell. Applies in groups and C2C |
+| `shell_sandbox` | `BUB_QQ_SHELL_SANDBOX` | `none` | Declare whether Bub runs inside an external sandbox (`none` / `external`). The plugin does not isolate commands; `none` with shell enabled logs a warning at startup |
+| `c2c_access` | `BUB_QQ_C2C_ACCESS` | `admin_users` | Who may use tools in C2C: `admin_users`, or `allow_users` (requires a non-empty `allow_users`; startup fails otherwise). Replies always work |
+| `download_allow_hosts` | `BUB_QQ_DOWNLOAD_ALLOW_HOSTS` | empty | Comma-separated hostnames that `media_url`, `web.fetch` and attachment downloads may reach even on private addresses (e.g. an intranet image host) |
+| `group_tool_policy` | `BUB_QQ_GROUP_TOOL_POLICY` | `restricted` | Policy for tools other than shell and files in groups: `open` / `restricted` (denies `subagent` and `denied_tools`) / `locked` (denies every tool except replies, admins included) |
+| `c2c_tool_policy` | `BUB_QQ_C2C_TOOL_POLICY` | `open` | Same, for C2C users allowed by `c2c_access` |
 | `denied_tools` | `BUB_QQ_DENIED_TOOLS` | empty | Extra comma-separated tool-name glob patterns denied under `restricted`, e.g. `web.fetch,tape.*` |
-| `workspace_jail` | `BUB_QQ_WORKSPACE_JAIL` | `true` | Refuse file/shell arguments and comma commands that resolve outside the Bub workspace (process pwd). Group owners/admins still bypass tool-policy tiers, but not this jail. Inbound attachments are saved under `<workspace>/inbox/`; if cwd is `/`, `$HOME`, or unwritable, they go to `<bub home>/qq/inbox/` |
 | `llm_rate_limit_per_minute` | `BUB_QQ_LLM_RATE_LIMIT_PER_MINUTE` | `0` | Max LLM calls per sender per session per minute; `0` disables |
 | `llm_rate_limit_notice` | `BUB_QQ_LLM_RATE_LIMIT_NOTICE` | `请求过于频繁，请稍后再试。` | Reply text used when a sender hits the LLM rate limit |
 | `websocket_intents` | `BUB_QQ_WEBSOCKET_INTENTS` | `1 << 25` | WebSocket identify intents (`GROUP_AND_C2C_EVENT`) |
@@ -185,6 +187,8 @@ export BUB_QQ_APPID=your_app_id
 export BUB_QQ_SECRET=your_secret
 export BUB_QQ_RECEIVE_MODE=websocket
 ```
+
+Removed in 0.3.0: `exec_approval` (use `group_shell`) and `workspace_jail` (replaced by the Guard; see Security). If still set they are ignored with a startup warning.
 
 Which group messages the bot hears is controlled in the QQ client by a group admin setting (all messages / last 10 @mentions / @only). Every received group message wakes the model; `was_mentioned` in the payload is `false` when the bot was not @mentioned.
 
@@ -211,26 +215,53 @@ Notes for `tool` mode:
 
 ## Security
 
-The plugin ships with layered, fail-closed protections for public chats:
+Every action a chat can trigger passes one checkpoint, the **Guard**: model tool calls (`before_tool_call`), comma commands (checked by the channel before Bub runs them, because Bub executes commands without hooks), and approved executions. It decides from who is asking and which resource the call touches. Anyone who can message the bot can steer the model, so model tool calls are treated as coming from the sender.
 
-1. **Allowlists** — when `allow_users` / `allow_groups` are set, messages from anyone else are dropped before reaching the model.
-2. **Comma-command gate** — inbound text starting with `,` is accepted only from authorized senders: in groups the platform-reported `member_role` must be `owner` / `admin`, or the sender must be in `admin_users`; in C2C only `admin_users` qualify. Everyone else's `,` message is forwarded as plain text. In groups, even those authorized senders still hit the `exec_approval` keyboard (including `,tape.info`); the workspace jail allowlist is not a permission grant.
-3. **Tool policy** — a `before_tool_call` hook denies dangerous tools per scope. Groups default to `restricted` (no `bash*`, `fs.write`, `fs.edit`, `subagent`); C2C defaults to `open`. Authorized senders (rule 2) bypass the policy. Group `restricted` tools, authorized comma commands, and workspace-jail escapes get a fixed approval keyboard (`exec_approval`); owners/admins are not exempt. Owners/admins/`admin_users` tap to allow-once, always-allow, or deny, then the plugin runs that call (comma commands go through the real session tape).
-4. **Workspace (pwd)** — the process working directory when `bub gateway` starts is the workspace. `fs.*` / `bash` / `qq.send(media_path=...)` and comma-command paths must stay inside it (`workspace_jail`; owners/admins cannot bypass). Inbound attachments are downloaded to `<pwd>/inbox/<message_id>/`; starting from `/` or `$HOME` redirects them to `~/.bub/qq/inbox/`. The path is injected as `<qq_workspace>` in the system prompt and as `workspace` on inbound JSON.
-5. **Rate limit** — a `before_llm_call` hook caps LLM calls per sender per session (`llm_rate_limit_per_minute`) and short-circuits the turn with `llm_rate_limit_notice` when exceeded.
-6. **Audit log** — `after_llm_call` / `after_tool_call` hooks emit `qq.audit.llm` / `qq.audit.tool` log lines with session, sender, role, tool/model, duration, and error type.
+**Who is trusted.** Only admins: identities in `admin_users` plus those registered with `,qq.claim`. QQ group owner/admin roles grant nothing, because whoever deploys the bot is not necessarily the group owner. The same person has a different openid in C2C and in each group, so identities are scoped (`c2c:<user_openid>`, `group:<group_openid>:<member_openid>`).
 
-Note: with no configuration, comma commands are unusable in C2C (fail-closed). Set `admin_users` to your own openid to keep command access.
+**What each resource allows** (defaults):
+
+| Resource | Everyone else | Admins |
+| --- | --- | --- |
+| shell (`bash`) | denied | approval for every command (`group_shell`) |
+| read files (`fs.read`) | inside the workspace | inside the workspace |
+| write files (`fs.write` / `fs.edit`) | denied | inside the workspace |
+| protected files (`.env*`, `.git/`, the state file) | denied | denied |
+| send a file (`qq.send media_path`) | only `outbox/` and `inbox/` | same |
+| downloads (`media_url`, `web.fetch`, attachments) | public internet only, every redirect checked | same |
+| other tools | `group_tool_policy` / `c2c_tool_policy` | same |
+
+In C2C, tools are admin-only by default (`c2c_access`); replies always work.
+
+**Approval.** An admin's shell command posts a card with the full command (commands too long to show in full are refused, never truncated) and two buttons, clickable only by that group's registered admins. A tap on allow issues a one-time token bound to the session, requester, tool and exact arguments, valid for 240 seconds; the command then re-enters the Guard to use it. There is no always-allow. Model-issued commands post their result to the chat; approved comma commands run through the normal session.
+
+**Shell is not sandboxed by the plugin.** Nothing in bub-qq confines what an approved command does. Run Bub in a container or similar and set `shell_sandbox=external`, or set `group_shell=deny`.
+
+**Becoming an admin.** On first start with no admins, the log prints a one-time pairing code:
+
+```
+qq.admin.unclaimed no admins configured; send ',qq.claim K7QX2M9PHT' to the bot in a private (C2C) chat within 10 minutes to become its admin
+```
+
+1. Add the bot as a friend and send `,qq.claim <code>` in C2C. A code sent in a group is burned and replaced.
+2. To act as admin in a group, send `,qq.claim group` in C2C, then post the returned group code (valid 2 minutes, single use) in that group.
+3. `,qq.admins` lists admins; `,qq.admins remove <identity>` removes a registered one.
+
+Five wrong codes lock that sender out for 10 minutes. Claim and admin commands are handled by the plugin and never reach the model or the tape. You can skip pairing by writing identities into `admin_users`.
+
+Also in place: allowlists (`allow_users` / `allow_groups`) drop other chats before the model; `llm_rate_limit_per_minute` caps LLM calls per sender; `qq.audit.llm` / `qq.audit.tool` log lines record every call.
 
 ### Ops comma commands
 
-The plugin ships model-invisible comma commands (registered with `agent_use=False`) for authorized senders. In groups they still require the approval keyboard:
+Comma commands are accepted only from admins; anyone else's `,` message reaches the model as plain text. Each command is checked by the Guard exactly as Bub will run it.
 
 | Command | Description |
 | --- | --- |
+| `,qq.claim <code>` / `,qq.claim group` | Register as admin (see above); accepted from anyone |
+| `,qq.admins` / `,qq.admins remove <identity>` | List or remove admins |
 | `,qq.version` | Show the installed bub-qq plugin version |
 
-Any other registered Bub tool can also be run as `,name args`, and an unknown `,name` falls back to executing the line as a bash command — which is why the comma-command gate effectively grants authorized senders full shell access.
+Any other registered Bub tool can be run as `,name args`; an unknown `,name` is run by Bub as a shell line and therefore follows the shell rule.
 
 ## Run
 
@@ -240,7 +271,7 @@ QQ is a channel listener surface. Start Bub gateway after the plugin is installe
 bub gateway
 ```
 
-The workspace is pwd at start. Prefer a dedicated directory so inbound files land in `inbox/` at that root, without an extra `qq/` folder:
+The workspace is pwd at start. Prefer a dedicated directory, so downloaded attachments land in `inbox/` and plugin downloads in `outbox/` at its root:
 
 ```bash
 mkdir -p ~/Documents/bub-qq-work
@@ -248,7 +279,7 @@ cd ~/Documents/bub-qq-work
 bub gateway
 ```
 
-If you start from `/` or `$HOME` (or a directory that is not writable), the plugin writes attachments to `~/.bub/qq/inbox/` instead of scattering files at the filesystem root. The jail (`fs` / `bash` must stay inside pwd) still uses the process working directory.
+If you start from `/` or `$HOME` (or a directory that is not writable), those folders move to `~/.bub/qq/` instead of the filesystem root. File tools still stay inside the process working directory.
 
 For webhook mode, expose a public HTTPS URL that reaches the embedded server (host/port/path above) and register it in the QQ bot console. For websocket mode, ensure the console is **not** locked into a successful webhook-only configuration.
 
@@ -286,8 +317,8 @@ Inbound non-command messages are encoded as a JSON string, including fields like
 - `quoted_messages` (when present: quoted message / merged-forward chat record content from `msg_elements`, with `message`, optional `sender_name`, and nested `messages`)
 - `message_type` (0=text, 3=ARK card, 101/102/103=quote or chat record)
 - `ark_data` (card payload when `message_type` is 3)
-- `workspace` (absolute Bub workspace path — pwd at gateway start)
-- inbound attachments also get `attachments[].local_path` (downloaded under `inbox/<message_id>/`, or `~/.bub/qq/inbox/` when cwd is unsafe)
+
+Attachments are not downloaded on arrival. When the model needs one it calls `qq.fetch_attachment(message_id, index)`, which saves it under `inbox/<message_id>/` (only for messages from the same chat).
 
 In `direct` mode, normal replies should return final text and let Bub outbound routing call `QQChannel.send`; in `tool` mode, replies go through the `qq.send` tool. In both cases `msg_seq` is managed inside the plugin — never invent protocol fields.
 
@@ -302,14 +333,13 @@ In `direct` mode, normal replies should return final text and let Bub outbound r
 - Webhook request verification (`X-Signature-Ed25519`, `X-Signature-Timestamp`)
 - WebSocket receive path with reconnect / resume and optional sharding
 - C2C / group inbound adaptation, `msg_id` dedupe, 60-minute passive text or markdown replies
-- `qq.send` rich media: download `media_url` locally (or use `media_path`), multipart upload, then `msg_type = 7` (C2C/group isolated; passive window only)
-- Workspace is pwd at gateway start: file/shell tools stay inside it; inbound attachments land in `inbox/` (`~/.bub/qq/` when cwd is `/` or `$HOME`)
-- `qq.send(media_path=...)` multipart upload for workspace-local files (paths outside the workspace are refused)
+- `qq.send` rich media: download `media_url` (public addresses only) or use `media_path` (`outbox/` / `inbox/` only), multipart upload, then `msg_type = 7` (C2C/group isolated; passive window only)
+- On-demand attachment download with `qq.fetch_attachment`
 - Plugin-owned message buttons (fixed templates); `INTERACTION_CREATE` type 11/12 is PUT-acked then adapted inbound
 - Group text receive/reply; message scope is controlled in the QQ client by a group admin
 - In-memory send idempotency for the same `session_id + msg_id + msg_seq`
 - OpenAPI error surfacing (HTTP status, platform `code` / `err_code`, trace_id from the response header or body) and error catalog metadata
-- Layered security: allowlists, role-gated comma commands, per-scope tool policy, LLM rate limiting, and audit logs (see Security)
+- Guard-based security: admin pairing, per-resource rules, one-time approvals for shell, protected files, public-only downloads, allowlists, LLM rate limiting, and audit logs (see Security)
 - Proactive group messages as a passive-reply fallback (`active_messages`), with persisted per-group/user opt-in state from `*_MSG_RECEIVE` / `*_MSG_REJECT` events
 - claw_cfg round-trip: `INTERACTION_CREATE` 2002 updates are persisted per group and 2001 queries echo the real `require_mention` state
 - 304023/304024 (async manual audit) treated as pending success instead of a failed send
@@ -319,7 +349,7 @@ In `direct` mode, normal replies should return final text and let Bub outbound r
 ### Not yet
 
 - QQ Guild
-- Admin button-approval for a group member's dangerous tools/commands
+- Sandboxing shell commands (declare an external sandbox with `shell_sandbox`)
 - Wider webhook event coverage beyond validation, basic `{"op":12}` ack, C2C/group messages, message-toggle events, interaction query/update, and button/menu clicks
 - Active C2C push (discontinued by the platform on 2025-04-21)
 - Markdown in active group messages (requires a registered template; active path sends plain text)
