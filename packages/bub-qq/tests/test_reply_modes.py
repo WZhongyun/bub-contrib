@@ -469,7 +469,7 @@ def test_qq_send_tool_rejects_media_path_outside_workspace(
     finally:
         runtime.set_active_channel(None)
 
-    assert "outside the workspace" in result
+    assert "outbox" in result
     assert channel.messages == []
 
 

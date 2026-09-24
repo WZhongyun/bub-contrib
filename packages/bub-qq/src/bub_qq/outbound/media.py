@@ -24,8 +24,12 @@ from bub.channels.message import ChannelMessage
 from loguru import logger
 
 from ..inbound.persist import download_to_path
+from ..netguard import BlockedAddressError
+from ..netguard import PublicOnlyResolver
+from ..netguard import check_public_url
 from ..protocol.errors import QQOpenAPIError
 from ..workspace import MAX_INBOUND_DOWNLOAD_BYTES
+from ..workspace import media_path_reason
 from ..workspace import outbox_dir
 from ..workspace import safe_filename
 
@@ -94,13 +98,15 @@ async def download_media_url(
     suffix = Path(name).suffix
     dest = dest_dir / f"{stem}-{uuid.uuid4().hex[:8]}{suffix}"
     timeout = aiohttp.ClientTimeout(total=60)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver())
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         await download_to_path(
             session,
             url,
             dest,
             max_bytes=MAX_INBOUND_DOWNLOAD_BYTES,
             headers=_DOWNLOAD_HEADERS,
+            url_guard=check_public_url,
         )
     logger.info("qq.media.downloaded url={} dest={}", url, dest)
     return dest
@@ -170,6 +176,10 @@ def media_spec_from_args(
         return None, None
     if not _is_http_url(url):
         return None, "Not sent: media_url must be an http(s) URL."
+    try:
+        check_public_url(url)
+    except BlockedAddressError:
+        return None, "Not sent: media_url must point to a public internet address."
     resolved_type = _optional_file_type(file_type)
     if resolved_type is None:
         resolved_type = infer_file_type(url)
@@ -303,7 +313,7 @@ def media_from_message(message: ChannelMessage) -> MediaSpec | None:
 def resolve_media_path(
     raw: str, workspace: str | None
 ) -> tuple[Path | None, str | None]:
-    """Resolve a local media path; refuse anything outside the workspace."""
+    """Resolve a local media path; only ``outbox/`` and ``inbox/`` files."""
 
     text = raw.strip()
     if not text:
@@ -313,10 +323,9 @@ def resolve_media_path(
     root = Path(workspace).expanduser().resolve()
     path = Path(text).expanduser()
     resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError:
-        return None, "Not sent: media_path is outside the workspace."
+    reason = media_path_reason(resolved, root)
+    if reason is not None:
+        return None, f"Not sent: {reason}"
     if not resolved.is_file():
         return None, "Not sent: media_path is not a file."
     return resolved, None

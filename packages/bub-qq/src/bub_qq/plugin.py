@@ -25,8 +25,10 @@ from .approval import consume_once_grant
 from .approval import has_always_grant
 from .approval import maybe_request_approval
 from .security import evaluate_tool_call
+from .store import resolve_state_path
 from .workspace import artifact_root
 from .workspace import tool_escapes_workspace
+from .workspace import tool_protected_reason
 from .workspace import workspace_from_state
 
 CHANNEL_NAME = "qq"
@@ -181,6 +183,19 @@ async def before_tool_call(
     if qq_state is None:
         return None
     config = bub.ensure_config(QQConfig)
+    # Protected files and disallowed media are refused before grants and
+    # approval: no identity or admin tap may unlock them.
+    protected_reason = tool_protected_reason(
+        call, workspace_from_state(state), extra=(resolve_state_path(config),)
+    )
+    if protected_reason is not None:
+        logger.warning(
+            "qq.security.tool_denied tool={} session_id={} sender_id={} reason=protected",
+            call.tool,
+            qq_state.get("session_id"),
+            qq_state.get("sender_id"),
+        )
+        return ToolCallDecision.deny(protected_reason)
     session_id = str(qq_state.get("session_id") or "")
     sender_id = str(qq_state.get("sender_id") or "")
     if consume_once_grant(session_id, sender_id, call.tool) or has_always_grant(

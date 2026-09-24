@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import asyncio
+import socket
+from pathlib import Path
+
+import aiohttp
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
+from bub_qq.inbound.persist import download_to_path
+from bub_qq.netguard import BlockedAddressError
+from bub_qq.netguard import PublicOnlyResolver
+from bub_qq.netguard import check_public_url
+from bub_qq.netguard import is_public_address
+from bub_qq.outbound.media import download_media_url
+from bub_qq.outbound.media import media_spec_from_args
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.5/x",
+        "http://192.168.1.1/x",
+        "http://[::1]/x",
+        "http://[::ffff:127.0.0.1]/x",
+        "http://0.0.0.0/x",
+        "file:///etc/passwd",
+        "http:///no-host",
+    ],
+)
+def test_check_public_url_rejects_non_public_targets(url: str) -> None:
+    with pytest.raises(BlockedAddressError):
+        check_public_url(url)
+
+
+def test_check_public_url_allows_public_ip_and_hostnames() -> None:
+    check_public_url("https://93.184.215.14/a.png")
+    # Hostnames pass here; PublicOnlyResolver checks what they resolve to.
+    check_public_url("https://example.com/a.png")
+    assert is_public_address("8.8.8.8")
+    assert not is_public_address("fe80::1%eth0")
+
+
+class _FakeResolver:
+    def __init__(self, hosts: list[str]) -> None:
+        self._hosts = hosts
+        self.closed = False
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        return [
+            {
+                "hostname": host,
+                "host": address,
+                "port": port,
+                "family": family,
+                "proto": 0,
+                "flags": 0,
+            }
+            for address in self._hosts
+        ]
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_public_only_resolver_filters_private_answers() -> None:
+    async def _run() -> None:
+        mixed = PublicOnlyResolver(_FakeResolver(["10.0.0.1", "93.184.215.14"]))
+        results = await mixed.resolve("mixed.example", 443)
+        assert [r["host"] for r in results] == ["93.184.215.14"]
+
+        private = PublicOnlyResolver(_FakeResolver(["127.0.0.1", "169.254.169.254"]))
+        with pytest.raises(BlockedAddressError):
+            await private.resolve("rebind.example", 80)
+
+    asyncio.run(_run())
+
+
+def _redirect_app() -> web.Application:
+    async def file(request: web.Request) -> web.Response:
+        return web.Response(body=b"payload")
+
+    async def hop(request: web.Request) -> web.Response:
+        raise web.HTTPFound("/file")
+
+    async def evil(request: web.Request) -> web.Response:
+        raise web.HTTPFound("http://blocked.invalid/secret")
+
+    async def loop(request: web.Request) -> web.Response:
+        raise web.HTTPFound("/loop")
+
+    app = web.Application()
+    app.router.add_get("/file", file)
+    app.router.add_get("/hop", hop)
+    app.router.add_get("/evil", evil)
+    app.router.add_get("/loop", loop)
+    return app
+
+
+def _guard_blocking(host: str):
+    seen: list[str] = []
+
+    def guard(url: str) -> None:
+        seen.append(url)
+        if host in url:
+            raise BlockedAddressError(f"blocked {url}")
+
+    return guard, seen
+
+
+def test_download_guard_checks_every_redirect_hop(tmp_path: Path) -> None:
+    async def _run() -> None:
+        server = TestServer(_redirect_app())
+        await server.start_server()
+        try:
+            base = str(server.make_url(""))
+            async with aiohttp.ClientSession() as session:
+                guard, seen = _guard_blocking("blocked.invalid")
+                dest = tmp_path / "ok.bin"
+                await download_to_path(
+                    session, f"{base}/hop", dest, url_guard=guard
+                )
+                assert dest.read_bytes() == b"payload"
+                assert seen == [f"{base}/hop", f"{base}/file"]
+
+                guard, seen = _guard_blocking("blocked.invalid")
+                with pytest.raises(BlockedAddressError):
+                    await download_to_path(
+                        session, f"{base}/evil", tmp_path / "evil.bin", url_guard=guard
+                    )
+                assert seen[-1] == "http://blocked.invalid/secret"
+                assert not (tmp_path / "evil.bin").exists()
+
+                guard, _ = _guard_blocking("blocked.invalid")
+                with pytest.raises(ValueError, match="redirects"):
+                    await download_to_path(
+                        session,
+                        f"{base}/loop",
+                        tmp_path / "loop.bin",
+                        url_guard=guard,
+                        max_redirects=3,
+                    )
+        finally:
+            await server.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:9/x.png", "http://localhost:9/x.png"]
+)
+def test_download_media_url_refuses_loopback(tmp_path: Path, url: str) -> None:
+    with pytest.raises(BlockedAddressError):
+        asyncio.run(download_media_url(url, workspace=tmp_path))
+    assert not (tmp_path / "outbox").exists() or not any(
+        (tmp_path / "outbox").iterdir()
+    )
+
+
+def test_media_spec_rejects_private_literal_early() -> None:
+    spec, error = media_spec_from_args("http://169.254.169.254/latest/meta-data")
+    assert spec is None
+    assert error == "Not sent: media_url must point to a public internet address."

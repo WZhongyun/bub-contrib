@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -26,6 +27,7 @@ MAX_INBOUND_DOWNLOAD_BYTES = 200 * 1024 * 1024
 _FS_TOOLS = frozenset(
     {"fs.read", "fs.write", "fs.edit", "fs_read", "fs_write", "fs_edit"}
 )
+_SENSITIVE_DIR_NAMES = frozenset({".git"})
 _BASH_TOOLS = frozenset({"bash", "bash.output", "bash.kill", "bash_output", "bash_kill"})
 # Names that are not shell. This is not a permission grant: group comma
 # commands still go through exec_approval before Bub runs them.
@@ -217,6 +219,87 @@ def safe_filename(name: str | None, url: str | None, index: int) -> str:
     return raw or f"file-{index}"
 
 
+def sensitive_path_reason(path: Path, *, extra: Iterable[Path] = ()) -> str | None:
+    """Denial message when ``path`` is a protected file, else None.
+
+    Protected files hold credentials or plugin state: ``.env`` files (Bub
+    and bub-qq load secrets from them), anything under ``.git/``, and the
+    ``extra`` paths (the QQ state file). The check runs on the resolved
+    path, so a symlink pointing at a protected file is caught too. No
+    identity, approval or config can unlock these.
+    """
+
+    resolved = path.expanduser().resolve()
+    name = resolved.name
+    protected = (
+        name == ".env"
+        or name.startswith(".env.")
+        or any(part in _SENSITIVE_DIR_NAMES for part in resolved.parts)
+        or any(resolved == other.expanduser().resolve() for other in extra)
+    )
+    if not protected:
+        return None
+    return (
+        f"'{path}' is a protected file (.env, .git/ or QQ state) and cannot be"
+        " read, written or sent by QQ tools."
+    )
+
+
+def media_path_reason(path: Path, workspace: Path) -> str | None:
+    """Denial message unless ``path`` may be sent to the chat as media.
+
+    Only files under ``outbox/`` (plugin downloads, generated files) and
+    ``inbox/`` (saved attachments) qualify; anything else in the workspace
+    could be source code or secrets.
+    """
+
+    resolved = path.expanduser().resolve()
+    sensitive = sensitive_path_reason(resolved)
+    if sensitive is not None:
+        return sensitive
+    root = artifact_root(workspace)
+    for allowed in (root / OUTBOX_NAME, root / INBOX_NAME):
+        if resolved.is_relative_to(allowed):
+            return None
+    return (
+        f"media_path must be a file under {root / OUTBOX_NAME}/ or"
+        f" {root / INBOX_NAME}/."
+    )
+
+
+def tool_protected_reason(
+    call: ToolCall, workspace: Path, *, extra: Iterable[Path] = ()
+) -> str | None:
+    """Hard denial for protected files and disallowed media, else None.
+
+    Unlike :func:`tool_escapes_workspace` this never becomes an approval
+    request and does not depend on ``workspace_jail``.
+    """
+
+    args = call.arguments if isinstance(call.arguments, dict) else {}
+    if call.tool in _FS_TOOLS:
+        raw = args.get("path")
+        if raw is None or not str(raw).strip():
+            return None
+        return sensitive_path_reason(
+            _resolve_from(str(raw).strip(), workspace), extra=extra
+        )
+    if call.tool in {"qq.send", "qq_send"}:
+        raw = args.get("media_path")
+        if raw is None or not str(raw).strip():
+            return None
+        resolved = _resolve_from(str(raw).strip(), workspace)
+        return sensitive_path_reason(resolved, extra=extra) or media_path_reason(
+            resolved, workspace
+        )
+    return None
+
+
+def _resolve_from(raw: str, workspace: Path) -> Path:
+    path = Path(raw).expanduser()
+    return path.resolve() if path.is_absolute() else (workspace / path).resolve()
+
+
 def _path_arg_denied(raw: object, workspace: Path) -> str | None:
     if raw is None or not str(raw).strip():
         return None
@@ -226,7 +309,7 @@ def _path_arg_denied(raw: object, workspace: Path) -> str | None:
             f"path '{text}' is outside the workspace ({workspace}). "
             "QQ file and shell tools are confined to the process working directory."
         )
-    return None
+    return sensitive_path_reason(_resolve_from(text, workspace))
 
 
 def _path_like_tokens(cmd: str) -> list[str]:

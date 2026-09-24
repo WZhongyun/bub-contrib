@@ -81,18 +81,28 @@ class MultipartStub:
         raise AssertionError("markdown should not be used")
 
 
-def test_resolve_media_path_stays_in_workspace(tmp_path: Path) -> None:
-    inside = tmp_path / "clip.mp4"
-    inside.write_bytes(b"abcd")
+def test_resolve_media_path_only_allows_outbox_and_inbox(tmp_path: Path) -> None:
+    (tmp_path / "outbox").mkdir()
+    (tmp_path / "inbox" / "msg-1").mkdir(parents=True)
+    generated = tmp_path / "outbox" / "clip.mp4"
+    generated.write_bytes(b"abcd")
+    received = tmp_path / "inbox" / "msg-1" / "photo.png"
+    received.write_bytes(b"png")
+    (tmp_path / "notes.md").write_text("private", encoding="utf-8")
+    (tmp_path / "outbox" / ".env").write_text("SECRET=1", encoding="utf-8")
     outside = tmp_path.parent / "outside.mp4"
-    resolved, error = resolve_media_path("clip.mp4", str(tmp_path))
-    assert error is None
-    assert resolved == inside.resolve()
 
-    resolved, error = resolve_media_path(str(outside), str(tmp_path))
-    assert resolved is None
-    assert error is not None
-    assert "outside" in error
+    resolved, error = resolve_media_path("outbox/clip.mp4", str(tmp_path))
+    assert error is None
+    assert resolved == generated.resolve()
+    resolved, error = resolve_media_path(str(received), str(tmp_path))
+    assert error is None
+    assert resolved == received.resolve()
+
+    for raw in ("notes.md", str(outside), "outbox/.env"):
+        resolved, error = resolve_media_path(raw, str(tmp_path))
+        assert resolved is None
+        assert error is not None and error.startswith("Not sent:")
 
 
 def test_upload_local_file_puts_parts_then_merges(tmp_path: Path) -> None:

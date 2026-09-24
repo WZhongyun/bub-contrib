@@ -14,11 +14,25 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+if TYPE_CHECKING:
+    from .config import QQConfig
+
 _SECTION_BY_SCOPE = {"group": "groups", "c2c": "users"}
+
+
+def resolve_state_path(config: QQConfig) -> Path:
+    """``state_file`` from config, or ``<bub home>/qq/state.json``."""
+
+    raw = (config.state_file or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    import bub
+
+    return bub.home / "qq" / "state.json"
 
 
 class QQPlatformStore:

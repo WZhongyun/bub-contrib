@@ -45,6 +45,7 @@ from .session import QQInboundDeduper
 from .session import QQSessionState
 from .session import remember_session
 from .store import QQPlatformStore
+from .store import resolve_state_path
 from .workspace import artifact_root
 
 # Admin toggles for proactive messages, pushed when a group admin or C2C
@@ -76,7 +77,7 @@ class QQChannel(Channel):
             max_entries=self._config.session_state_size
         )
         self._policy = QQAccessPolicy.from_config(self._config)
-        self._platform_store = QQPlatformStore(self._resolve_state_path())
+        self._platform_store = QQPlatformStore(resolve_state_path(self._config))
         self._workspace = Path.cwd().resolve()
         # In tool reply mode the model must reply through the qq.send tool,
         # so direct model output is routed to the "null" channel and dropped.
@@ -120,12 +121,6 @@ class QQChannel(Channel):
             workspace=self._workspace,
         )
         set_active_channel(self)
-
-    def _resolve_state_path(self) -> Path:
-        raw = (self._config.state_file or "").strip()
-        if raw:
-            return Path(raw).expanduser()
-        return bub.home / "qq" / "state.json"
 
     @property
     def needs_debounce(self) -> bool:
