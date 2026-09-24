@@ -16,11 +16,17 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from typing import Any
+from urllib.parse import urljoin
 from urllib.parse import urlparse
 
+import aiohttp
 from aiohttp.abc import AbstractResolver
 from aiohttp.abc import ResolveResult
 from aiohttp.resolver import DefaultResolver
+
+
+MAX_FETCH_BYTES = 5 * 1024 * 1024
 
 
 class BlockedAddressError(ValueError):
@@ -36,8 +42,11 @@ def is_public_address(host: str) -> bool:
     return address.is_global
 
 
-def check_public_url(url: str) -> None:
-    """Raise :class:`BlockedAddressError` unless ``url`` may be fetched."""
+def check_public_url(url: str, *, allow_hosts: frozenset[str] = frozenset()) -> None:
+    """Raise :class:`BlockedAddressError` unless ``url`` may be fetched.
+
+    ``allow_hosts`` (``download_allow_hosts``) exempts listed hostnames.
+    """
 
     parsed = urlparse(url)
     if parsed.scheme.lower() not in {"http", "https"}:
@@ -45,6 +54,8 @@ def check_public_url(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise BlockedAddressError("URL has no host")
+    if host.lower() in allow_hosts:
+        return
     try:
         public = is_public_address(host)
     except ValueError:
@@ -56,13 +67,21 @@ def check_public_url(url: str) -> None:
 class PublicOnlyResolver(AbstractResolver):
     """DNS resolver that only returns globally routable addresses."""
 
-    def __init__(self, inner: AbstractResolver | None = None) -> None:
+    def __init__(
+        self,
+        inner: AbstractResolver | None = None,
+        *,
+        allow_hosts: frozenset[str] = frozenset(),
+    ) -> None:
         self._inner = inner if inner is not None else DefaultResolver()
+        self._allow_hosts = allow_hosts
 
     async def resolve(
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
     ) -> list[ResolveResult]:
         results = await self._inner.resolve(host, port, family)
+        if host.lower() in self._allow_hosts:
+            return results
         allowed = [result for result in results if is_public_address(result["host"])]
         if not allowed:
             raise BlockedAddressError(
@@ -72,3 +91,63 @@ class PublicOnlyResolver(AbstractResolver):
 
     async def close(self) -> None:
         await self._inner.close()
+
+
+def guarded_session(
+    *, timeout: float, allow_hosts: frozenset[str] = frozenset(), **kwargs: Any
+) -> aiohttp.ClientSession:
+    """A client session whose connections only reach public addresses."""
+
+    connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver(allow_hosts=allow_hosts))
+    return aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout), connector=connector, **kwargs
+    )
+
+
+async def fetch_text(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+    max_bytes: int = MAX_FETCH_BYTES,
+    allow_hosts: frozenset[str] = frozenset(),
+    max_redirects: int = 5,
+) -> str:
+    """GET ``url`` like Bub's ``web.fetch``, but only on the public internet.
+
+    Every redirect hop is checked before it is requested, and the body is
+    capped at ``max_bytes``.
+    """
+
+    async with guarded_session(
+        timeout=timeout, allow_hosts=allow_hosts, headers=headers or {}
+    ) as session:
+        for _ in range(max_redirects + 1):
+            check_public_url(url, allow_hosts=allow_hosts)
+            async with session.get(url, allow_redirects=False) as response:
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("redirect without Location header")
+                    url = urljoin(str(response.url), location)
+                    continue
+                response.raise_for_status()
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    body.extend(chunk)
+                    if len(body) > max_bytes:
+                        raise ValueError(f"response larger than {max_bytes} bytes")
+                return bytes(body).decode(response.charset or "utf-8", "replace")
+        raise ValueError(f"more than {max_redirects} redirects")
+
+
+def download_allow_hosts() -> frozenset[str]:
+    """Lower-cased ``download_allow_hosts`` from the QQ config."""
+
+    import bub
+
+    from .config import QQConfig
+    from .security import parse_id_list
+
+    config = bub.ensure_config(QQConfig)
+    return frozenset(host.lower() for host in parse_id_list(config.download_allow_hosts or ""))

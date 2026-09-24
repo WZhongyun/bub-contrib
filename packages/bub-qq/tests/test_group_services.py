@@ -212,24 +212,27 @@ def test_group_inbound_parses_member_role_into_payload() -> None:
     assert payload["sender_role"] == "admin"
 
 
-def test_group_inbound_gates_comma_commands_by_role() -> None:
-    admin_parsed = _service(_state()).parse_inbound(
-        _payload(content="<@bot-openid> ,status", member_role="admin")
+def test_group_inbound_gates_comma_commands_by_admin_not_role() -> None:
+    def admin(requester) -> bool:
+        return requester.identity == "group:group-openid:member-openid"
+
+    owner_parsed = _service(_state()).parse_inbound(
+        _payload(content="<@bot-openid> ,status", member_role="owner")
     )
-    member_parsed = _service(_state()).parse_inbound(
-        _payload(content="<@bot-openid> ,status", member_role="member")
-    )
-    allowlisted_parsed = _service(
-        _state(), QQAccessPolicy(admin_users=frozenset({"member-openid"}))
+    listed_parsed = QQGroupInboundService(
+        channel_name="qq",
+        deduper=QQInboundDeduper(16),
+        state=_state(),
+        policy=QQAccessPolicy(),
+        is_admin=admin,
     ).parse_inbound(_payload(content="<@bot-openid> ,status", member_role="member"))
 
-    assert admin_parsed is not None
-    assert admin_parsed[1].kind == "command"
-    assert member_parsed is not None
-    assert member_parsed[1].kind == "normal"
-    assert ",status" in json.loads(member_parsed[1].content)["message"]
-    assert allowlisted_parsed is not None
-    assert allowlisted_parsed[1].kind == "command"
+    # QQ group owners are not trusted unless the deployer lists them.
+    assert owner_parsed is not None
+    assert owner_parsed[1].kind == "normal"
+    assert ",status" in json.loads(owner_parsed[1].content)["message"]
+    assert listed_parsed is not None
+    assert listed_parsed[1].kind == "command"
 
 
 def test_strip_mention_text_removes_bot_and_keeps_others() -> None:

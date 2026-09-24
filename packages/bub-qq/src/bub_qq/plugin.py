@@ -1,5 +1,6 @@
 from typing import Any
 
+import aiohttp
 import bub
 from bub import hookimpl
 from bub import inquirer as bub_inquirer
@@ -21,14 +22,14 @@ from .security import QQ_CONTEXT_KEY
 from .security import QQ_STATE_KEY
 from .security import REPLY_TOOL_NAME
 from .security import SlidingWindowRateLimiter
-from .approval import consume_once_grant
-from .approval import has_always_grant
-from .approval import maybe_request_approval
-from .security import evaluate_tool_call
+from .approval import request_approval
+from .guard import Requester
+from .guard import evaluate
+from .netguard import BlockedAddressError
+from .netguard import download_allow_hosts
+from .netguard import fetch_text
 from .store import resolve_state_path
 from .workspace import artifact_root
-from .workspace import tool_escapes_workspace
-from .workspace import tool_protected_reason
 from .workspace import workspace_from_state
 
 CHANNEL_NAME = "qq"
@@ -183,55 +184,71 @@ async def before_tool_call(
     if qq_state is None:
         return None
     config = bub.ensure_config(QQConfig)
-    # Protected files and disallowed media are refused before grants and
-    # approval: no identity or admin tap may unlock them.
-    protected_reason = tool_protected_reason(
-        call, workspace_from_state(state), extra=(resolve_state_path(config),)
-    )
-    if protected_reason is not None:
-        logger.warning(
-            "qq.security.tool_denied tool={} session_id={} sender_id={} reason=protected",
-            call.tool,
-            qq_state.get("session_id"),
-            qq_state.get("sender_id"),
-        )
-        return ToolCallDecision.deny(protected_reason)
+    requester = Requester.from_state(qq_state)
     session_id = str(qq_state.get("session_id") or "")
-    sender_id = str(qq_state.get("sender_id") or "")
-    if consume_once_grant(session_id, sender_id, call.tool) or has_always_grant(
-        session_id, sender_id, call.tool
-    ):
-        return None
-    approval = await maybe_request_approval(call, state, config)
-    if approval is not None:
-        return approval
-    jail_reason = (
-        tool_escapes_workspace(call, workspace_from_state(state))
-        if config.workspace_jail
-        else None
+    workspace = workspace_from_state(state)
+    decision = evaluate(
+        call,
+        requester,
+        config=config,
+        workspace=workspace,
+        protected=(resolve_state_path(config),),
     )
-    if jail_reason is not None:
-        logger.warning(
-            "qq.security.tool_denied tool={} session_id={} sender_id={} role={} reason={}",
-            call.tool,
-            qq_state.get("session_id"),
-            qq_state.get("sender_id"),
-            qq_state.get("sender_role"),
-            jail_reason,
+    if decision.action == "approval":
+        # The approval flow runs the call itself once an admin allows it.
+        message = await request_approval(
+            call,
+            requester,
+            config=config,
+            session_id=session_id,
+            requester_name=str(qq_state.get("sender_name") or "").strip(),
+            workspace=str(workspace),
+            state={
+                key: value
+                for key, value in state.items()
+                if key in {QQ_STATE_KEY, "_runtime_workspace", "session_id"}
+            },
         )
-        return ToolCallDecision.deny(jail_reason)
-    reason = evaluate_tool_call(config, qq_state, call.tool)
-    if reason is None:
+        return ToolCallDecision.replace(message)
+    if decision.allowed and decision.resource == "fetch":
+        return await _guarded_web_fetch(call)
+    if decision.allowed:
         return None
     logger.warning(
-        "qq.security.tool_denied tool={} session_id={} sender_id={} role={} reason={}",
+        "qq.security.tool_denied tool={} resource={} session_id={} requester={} reason={}",
         call.tool,
-        qq_state.get("session_id"),
-        qq_state.get("sender_id"),
-        qq_state.get("sender_role"),
-        reason,
+        decision.resource,
+        session_id,
+        requester.identity,
+        decision.reason,
     )
-    return ToolCallDecision.deny(reason)
+    return ToolCallDecision.deny(decision.reason)
+
+
+async def _guarded_web_fetch(call: ToolCall) -> ToolCallDecision:
+    """Run ``web.fetch`` ourselves, restricted to public addresses.
+
+    Bub's handler follows redirects to any address, so a public URL could
+    bounce to cloud metadata or the private network.
+    """
+
+    args = call.arguments if isinstance(call.arguments, dict) else {}
+    url = str(args.get("url") or "")
+    headers = args.get("headers") if isinstance(args.get("headers"), dict) else None
+    timeout = args.get("timeout")
+    try:
+        text = await fetch_text(
+            url,
+            headers={str(k): str(v) for k, v in (headers or {}).items()},
+            timeout=float(timeout) if isinstance(timeout, int | float) and timeout > 0 else 30.0,
+            allow_hosts=download_allow_hosts(),
+        )
+    except BlockedAddressError as exc:
+        logger.warning("qq.security.fetch_blocked url={} reason={}", url, exc)
+        return ToolCallDecision.deny(f"web.fetch refused: {exc}")
+    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+        return ToolCallDecision.deny(f"web.fetch failed: {exc}")
+    return ToolCallDecision.replace(text)
 
 
 @hookimpl

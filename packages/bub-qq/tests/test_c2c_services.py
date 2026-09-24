@@ -180,7 +180,8 @@ def test_c2c_inbound_service_gates_comma_commands_by_admin_users() -> None:
         channel_name="qq",
         deduper=QQInboundDeduper(16),
         state=_state(),
-        policy=QQAccessPolicy(admin_users=frozenset({"user-openid"})),
+        policy=QQAccessPolicy(),
+        is_admin=lambda requester: requester.identity == "c2c:user-openid",
     )
     plain_service = QQC2CInboundService(
         channel_name="qq",
@@ -199,6 +200,17 @@ def test_c2c_inbound_service_gates_comma_commands_by_admin_users() -> None:
     assert plain_parsed is not None
     assert plain_parsed[1].kind == "normal"
     assert ",status" in plain_parsed[1].content
+
+
+def test_c2c_admin_bypasses_allow_users() -> None:
+    service = QQC2CInboundService(
+        channel_name="qq",
+        deduper=QQInboundDeduper(16),
+        state=_state(),
+        policy=QQAccessPolicy(allow_users=frozenset({"someone-else"})),
+        is_admin=lambda requester: requester.sender_id == "user-openid",
+    )
+    assert service.parse_inbound(_payload(content="hi")) is not None
 
 
 def test_c2c_send_service_sends_using_session_context() -> None:

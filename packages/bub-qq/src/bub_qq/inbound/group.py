@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from bub.channels.message import ChannelMessage
@@ -10,13 +10,12 @@ from loguru import logger
 
 from ..protocol.models import QQGroupMessage
 from ..protocol.models import QQMention
+from ..guard import Requester
 from ..security import QQ_CONTEXT_KEY
 from ..security import QQAccessPolicy
 from ..session import QQInboundDeduper
 from ..session import QQSessionState
 from ..session import remember_session
-from ..approval import remember_member_role
-from ..workspace import command_escapes_workspace
 from .common import attachment_payloads
 from .common import exclude_none
 from .common import msg_element_payloads
@@ -37,16 +36,14 @@ class QQGroupInboundService:
         state: QQSessionState,
         policy: QQAccessPolicy,
         suppress_direct_output: bool = False,
-        workspace: Path | None = None,
-        workspace_jail: bool = True,
+        is_admin: Callable[[Requester], bool] = lambda requester: False,
     ) -> None:
         self._channel_name = channel_name
         self._deduper = deduper
         self._state = state
         self._policy = policy
         self._suppress_direct_output = suppress_direct_output
-        self._workspace = workspace
-        self._workspace_jail = workspace_jail
+        self._is_admin = is_admin
 
     def parse_inbound(
         self, payload: dict[str, Any]
@@ -68,19 +65,17 @@ class QQGroupInboundService:
             )
             return None
 
-        remember_member_role(
-            message.group_openid, message.member_openid, message.member_role
-        )
         channel_message = build_group_channel_message(
             self._channel_name,
             message,
-            allow_command=self._policy.may_run_command(
-                scope="group",
-                sender_id=message.member_openid,
-                sender_role=message.member_role,
+            allow_command=self._is_admin(
+                Requester(
+                    scope="group",
+                    sender_id=message.member_openid,
+                    group_openid=message.group_openid,
+                )
             ),
             suppress_direct_output=self._suppress_direct_output,
-            workspace=self._workspace if self._workspace_jail else None,
         )
         remember_session(
             self._state,
@@ -97,7 +92,6 @@ def build_group_channel_message(
     *,
     allow_command: bool = False,
     suppress_direct_output: bool = False,
-    workspace: Path | None = None,
 ) -> ChannelMessage:
     session_id = f"{channel_name}:group:{message.group_openid}"
     chat_id = f"group:{message.group_openid}"
@@ -118,10 +112,7 @@ def build_group_channel_message(
     }
 
     if text.startswith(","):
-        blocked = (
-            command_escapes_workspace(text, workspace) if workspace is not None else None
-        )
-        if allow_command and blocked is None:
+        if allow_command:
             return ChannelMessage(
                 session_id=session_id,
                 content=text,
@@ -130,30 +121,6 @@ def build_group_channel_message(
                 kind="command",
                 is_active=True,
                 context=context,
-            )
-        if allow_command and blocked is not None:
-            logger.warning(
-                "qq.group.command_blocked group_openid={} member_openid={} reason=workspace_jail",
-                message.group_openid,
-                message.member_openid,
-            )
-            payload = {
-                "message": text,
-                "message_id": message.message_id,
-                "type": "command_blocked",
-                "sender_id": message.member_openid,
-                "blocked": blocked,
-                "chat_type": "group",
-                "group_openid": message.group_openid,
-            }
-            return ChannelMessage(
-                session_id=session_id,
-                content=json.dumps(exclude_none(payload), ensure_ascii=False),
-                channel=channel_name,
-                chat_id=chat_id,
-                is_active=True,
-                context=context,
-                output_channel="null" if suppress_direct_output else "",
             )
         logger.warning(
             "qq.group.command_denied group_openid={} member_openid={} role={}",
@@ -177,7 +144,6 @@ def build_group_channel_message(
         "quoted_messages": msg_element_payloads(message.msg_elements),
         "message_type": message.message_type,
         "ark_data": message.ark_data,
-        "workspace": str(workspace) if workspace is not None else None,
     }
     return ChannelMessage(
         session_id=session_id,

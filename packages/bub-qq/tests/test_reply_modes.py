@@ -22,7 +22,6 @@ from bub_qq.outbound.send_flow import normalize_outbound_content
 from bub_qq.protocol.models import QQC2CMessage
 from bub_qq.protocol.models import QQGroupMessage
 from bub_qq.security import denied_tool_reason
-from bub_qq.security import evaluate_tool_call
 from bub_qq.security import parse_id_list
 from bub_qq.session import QQSessionState
 
@@ -253,13 +252,28 @@ def test_system_prompt_hook_tool_mode(monkeypatch) -> None:
     assert "<qq_workspace>" in result
 
 
-def test_reply_tool_exempt_from_tool_policy() -> None:
-    config = _config(admin_users="", denied_tools="", group_tool_policy="locked")
-    qq_state = {"scope": "group", "sender_id": "member-1", "sender_role": "member"}
+def test_reply_tool_exempt_from_tool_policy(tmp_path) -> None:
+    from bub.hooks.interception import ToolCall
 
-    assert evaluate_tool_call(config, qq_state, "qq.send") is None
-    assert evaluate_tool_call(config, qq_state, "qq_send") is None
-    assert evaluate_tool_call(config, qq_state, "fs.read") is not None
+    from bub_qq.guard import Requester
+    from bub_qq.guard import evaluate
+
+    config = _config(
+        admin_users="",
+        denied_tools="",
+        group_tool_policy="locked",
+        c2c_access="admin_users",
+        group_shell="approval",
+    )
+    member = Requester(scope="group", sender_id="member-1", group_openid="g")
+
+    def decide(tool: str) -> str:
+        call = ToolCall(run_id="r", tool=tool, arguments={"content": "hi"})
+        return evaluate(call, member, config=config, workspace=tmp_path).action
+
+    assert decide("qq.send") == "allow"
+    assert decide("qq_send") == "allow"
+    assert decide("fs.read") == "deny"
 
 
 def test_denied_tool_reason_matches_model_facing_aliases() -> None:

@@ -25,7 +25,8 @@ from loguru import logger
 
 from ..inbound.persist import download_to_path
 from ..netguard import BlockedAddressError
-from ..netguard import PublicOnlyResolver
+from ..netguard import download_allow_hosts
+from ..netguard import guarded_session
 from ..netguard import check_public_url
 from ..protocol.errors import QQOpenAPIError
 from ..workspace import MAX_INBOUND_DOWNLOAD_BYTES
@@ -97,16 +98,15 @@ async def download_media_url(
     stem = Path(name).stem
     suffix = Path(name).suffix
     dest = dest_dir / f"{stem}-{uuid.uuid4().hex[:8]}{suffix}"
-    timeout = aiohttp.ClientTimeout(total=60)
-    connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver())
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+    allow_hosts = download_allow_hosts()
+    async with guarded_session(timeout=60, allow_hosts=allow_hosts) as session:
         await download_to_path(
             session,
             url,
             dest,
             max_bytes=MAX_INBOUND_DOWNLOAD_BYTES,
             headers=_DOWNLOAD_HEADERS,
-            url_guard=check_public_url,
+            url_guard=lambda hop: check_public_url(hop, allow_hosts=allow_hosts),
         )
     logger.info("qq.media.downloaded url={} dest={}", url, dest)
     return dest
@@ -177,7 +177,7 @@ def media_spec_from_args(
     if not _is_http_url(url):
         return None, "Not sent: media_url must be an http(s) URL."
     try:
-        check_public_url(url)
+        check_public_url(url, allow_hosts=download_allow_hosts())
     except BlockedAddressError:
         return None, "Not sent: media_url must point to a public internet address."
     resolved_type = _optional_file_type(file_type)

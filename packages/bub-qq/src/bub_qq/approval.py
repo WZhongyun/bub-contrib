@@ -1,41 +1,51 @@
-"""Plugin-owned command-execution approval (fixed keyboard, not LLM)."""
+"""Admin approval for calls the Guard marks ``approval`` (fixed keyboard).
+
+Flow: the Guard returns ``approval`` → :func:`request_approval` posts a card
+showing the full call and remembers it → an admin taps a button →
+:func:`begin_approval_click` checks the operator is an admin → on "allow"
+:func:`complete_approval_click` issues a one-time token and runs the call.
+Running re-enters the Guard, which accepts the token only for the exact
+session, requester, tool and arguments that were shown on the card. There
+is no always-allow: every shell command is confirmed on its own.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bub.channels.message import ChannelMessage
 from bub.hooks.interception import ToolCall
-from bub.hooks.interception import ToolCallDecision
 from loguru import logger
 
+from .guard import Requester
+from .guard import canonical_tool
+from .guard import group_admin_member_ids
+from .guard import is_admin
 from .runtime import get_active_channel
-from .security import GROUP_PRIVILEGED_ROLES
-from .security import QQAccessPolicy
-from .security import QQ_CONTEXT_KEY
-from .security import QQ_STATE_KEY
-from .security import REPLY_TOOL_NAME
-from .security import _tool_name_forms
-from .security import denied_tool_reason
-from .security import parse_id_list
 from .session import BoundedDict
-from .workspace import tool_escapes_workspace
-from .workspace import workspace_from_state
 
-APPROVAL_TTL_SECONDS = 300.0
-_PREVIEW_LIMIT = 400
+if TYPE_CHECKING:
+    from .config import QQConfig
+
+APPROVAL_TTL_SECONDS = 240.0
+PREVIEW_LIMIT = 1500
 _RESULT_LIMIT = 2000
 _MAX_PENDING = 64
+_MAX_TOKENS = 256
 
-_member_roles: dict[tuple[str, str], str] = {}
-_always_grants: dict[tuple[str, str, str], None] = {}
-_once_grants: dict[tuple[str, str, str], int] = {}
+ACK_OK = 0
+ACK_FAILED = 1
+ACK_NO_PERMISSION = 4
+
+_clock: Callable[[], float] = time.monotonic
 
 
 @dataclass
@@ -43,50 +53,144 @@ class PendingApproval:
     id: str
     tool: str
     arguments: dict[str, Any]
+    requester: Requester
     session_id: str
     chat_id: str
-    requester_id: str
-    group_openid: str
     preview: str
     created_at: float
     requester_name: str = ""
-    state: dict[str, Any] = field(default_factory=dict)
     workspace: str = ""
     command_line: str = ""
+    state: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def requester_id(self) -> str:
+        return self.requester.sender_id
+
+    @property
+    def group_openid(self) -> str:
+        return self.requester.group_openid
 
 
 _pending: BoundedDict[str, PendingApproval] = BoundedDict(_MAX_PENDING)
+_tokens: BoundedDict[tuple[str, str, str, str], float] = BoundedDict(_MAX_TOKENS)
 
 
 def reset_approval_state() -> None:
     _pending.clear()
-    _always_grants.clear()
-    _once_grants.clear()
-    _member_roles.clear()
+    _tokens.clear()
 
 
-def remember_member_role(group_openid: str, member_openid: str, role: str | None) -> None:
-    if not group_openid or not member_openid or not role:
-        return
-    _member_roles[(group_openid, member_openid)] = role
+def call_digest(tool: str, arguments: dict[str, Any] | None) -> str:
+    payload = json.dumps(
+        {"tool": canonical_tool(tool), "arguments": arguments or {}},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def cached_member_role(group_openid: str, member_openid: str) -> str | None:
-    return _member_roles.get((group_openid, member_openid))
+def _token_key(
+    session_id: str, requester: Requester, call: ToolCall
+) -> tuple[str, str, str, str]:
+    return (
+        session_id,
+        requester.identity,
+        canonical_tool(call.tool),
+        call_digest(call.tool, call.arguments),
+    )
 
 
-def build_approval_keyboard(approval_id: str) -> dict[str, Any]:
-    def button(
-        button_id: str, label: str, visited: str, data: str, style: int
-    ) -> dict[str, Any]:
+def issue_token(pending: PendingApproval) -> None:
+    call = ToolCall(run_id="approval", tool=pending.tool, arguments=pending.arguments)
+    _tokens[_token_key(pending.session_id, pending.requester, call)] = (
+        _clock() + APPROVAL_TTL_SECONDS
+    )
+
+
+def consume_token(session_id: str, requester: Requester, call: ToolCall) -> bool:
+    """Use up the token for exactly this call; False if absent or expired."""
+
+    expires_at = _tokens.pop(_token_key(session_id, requester, call), None)
+    return expires_at is not None and _clock() <= expires_at
+
+
+def comma_command_to_call(line: str) -> ToolCall:
+    """Map a comma command to exactly the call Bub's ``_run_command`` makes.
+
+    Bub looks the first word up in ``REGISTRY`` as typed (no aliasing) and
+    runs anything else as ``bash`` with the whole line. Positional words
+    are bound to the tool's parameters in order, so the Guard sees e.g.
+    ``,fs.read .env`` as ``fs.read(path=".env")``.
+    """
+
+    from bub.builtin import tools as _builtin_tools  # noqa: F401
+    from bub.tools import REGISTRY
+
+    from . import tools as _qq_tools  # noqa: F401
+
+    body = line[1:].strip() if line.startswith(",") else line.strip()
+    if not body:
+        raise ValueError("empty command")
+    try:
+        words = shlex.split(body)
+    except ValueError:
+        # Bub cannot parse it either; treat it as the shell line it would be.
+        return ToolCall(run_id="command", tool="bash", arguments={"cmd": body})
+    name = words[0]
+    tool = REGISTRY.get(name)
+    if tool is None:
+        return ToolCall(run_id="command", tool="bash", arguments={"cmd": body})
+    params = list((tool.parameters or {}).get("properties", {}))
+    arguments: dict[str, Any] = {}
+    positional = 0
+    for token in words[1:]:
+        if "=" in token:
+            key, value = token.split("=", 1)
+            arguments[key] = value
+        else:
+            key = params[positional] if positional < len(params) else f"_{positional}"
+            arguments[key] = token
+            positional += 1
+    return ToolCall(run_id="command", tool=name, arguments=arguments)
+
+
+def preview_call(tool: str, arguments: dict[str, Any], command_line: str = "") -> str:
+    if command_line:
+        return command_line.lstrip(",").strip()
+    if set(arguments) <= {"cmd", "cwd"} and "cmd" in arguments:
+        text = str(arguments.get("cmd") or "")
+        if arguments.get("cwd"):
+            text = f"(cwd={arguments['cwd']}) {text}"
+        return text
+    return json.dumps(arguments, ensure_ascii=False, default=str, indent=2)
+
+
+def _fenced(text: str) -> str:
+    fence = "```"
+    while fence in text:
+        fence += "`"
+    return f"{fence}\n{text}\n{fence}"
+
+
+def build_approval_keyboard(
+    approval_id: str, *, approver_ids: list[str] | None = None
+) -> dict[str, Any]:
+    if approver_ids:
+        permission: dict[str, Any] = {"type": 0, "specify_user_ids": list(approver_ids)}
+    else:
+        permission = {"type": 2}
+
+    def button(button_id: str, label: str, visited: str, data: str, style: int) -> dict:
         return {
             "id": button_id,
             "render_data": {"label": label, "visited_label": visited, "style": style},
             "action": {
                 "type": 1,
                 "data": data,
-                "permission": {"type": 2},
-                "click_limit": 1,
+                "permission": dict(permission),
+                "unsupport_tips": "请升级 QQ 后审批",
             },
             "group_id": "approval",
         }
@@ -96,27 +200,8 @@ def build_approval_keyboard(approval_id: str) -> dict[str, Any]:
             "rows": [
                 {
                     "buttons": [
-                        button(
-                            "allow",
-                            "✅ 允许一次",
-                            "已允许",
-                            f"approve:{approval_id}:allow-once",
-                            1,
-                        ),
-                        button(
-                            "always",
-                            "⭐ 始终允许",
-                            "已始终允许",
-                            f"approve:{approval_id}:allow-always",
-                            1,
-                        ),
-                        button(
-                            "deny",
-                            "❌ 拒绝",
-                            "已拒绝",
-                            f"approve:{approval_id}:deny",
-                            0,
-                        ),
+                        button("allow", "✅ 允许一次", "已允许", f"approve:{approval_id}:allow", 1),
+                        button("deny", "❌ 拒绝", "已拒绝", f"approve:{approval_id}:deny", 0),
                     ]
                 }
             ]
@@ -125,244 +210,100 @@ def build_approval_keyboard(approval_id: str) -> dict[str, Any]:
 
 
 def parse_approval_button(button_data: str) -> tuple[str, str] | None:
-    if not button_data.startswith("approve:"):
-        return None
     parts = button_data.split(":")
-    if len(parts) != 3:
+    if len(parts) != 3 or parts[0] != "approve":
         return None
     _, approval_id, decision = parts
-    if decision not in {"allow-once", "allow-always", "deny"}:
+    if decision not in {"allow", "deny"}:
         return None
     return approval_id, decision
 
 
-def grant_key(session_id: str, sender_id: str, tool: str) -> tuple[str, str, str]:
-    return (session_id, sender_id, tool)
-
-
-def has_always_grant(session_id: str, sender_id: str, tool: str) -> bool:
-    return grant_key(session_id, sender_id, tool) in _always_grants
-
-
-def consume_once_grant(session_id: str, sender_id: str, tool: str) -> bool:
-    key = grant_key(session_id, sender_id, tool)
-    remaining = _once_grants.get(key, 0)
-    if remaining <= 0:
-        return False
-    if remaining == 1:
-        _once_grants.pop(key, None)
-    else:
-        _once_grants[key] = remaining - 1
-    return True
-
-
-def _approval_reason(
+async def request_approval(
     call: ToolCall,
-    state: dict[str, Any],
-    qq_state: dict[str, Any],
-    config: Any,
-) -> str | None:
-    """Why this group call needs approval. Privileged senders are not exempt."""
-
-    if REPLY_TOOL_NAME in _tool_name_forms(call.tool):
-        return None
-    if getattr(config, "workspace_jail", True):
-        jail = tool_escapes_workspace(call, workspace_from_state(state))
-        if jail is not None:
-            return jail
-    policy = str(
-        getattr(config, "group_tool_policy", "restricted")
-        if str(qq_state.get("scope") or "") == "group"
-        else getattr(config, "c2c_tool_policy", "open")
-    )
-    if policy == "locked":
-        return None
-    return denied_tool_reason(
-        tool=call.tool,
-        tool_policy=policy,
-        extra_denied_patterns=parse_id_list(getattr(config, "denied_tools", "")),
-    )
-
-
-def preview_call(tool: str, arguments: dict[str, Any]) -> str:
-    if "cmd" in arguments:
-        text = str(arguments.get("cmd") or "")
-    elif "path" in arguments:
-        text = str(arguments.get("path") or "")
-    else:
-        text = json.dumps(arguments, ensure_ascii=False, default=str)
-    text = text.strip() or tool
-    if len(text) > _PREVIEW_LIMIT:
-        return text[:_PREVIEW_LIMIT] + "…"
-    return text
-
-
-def may_approve(
-    config: Any,
+    requester: Requester,
     *,
-    operator_id: str,
-    group_openid: str,
-    requester_id: str,
-) -> bool:
-    if not operator_id:
-        return False
-    policy = QQAccessPolicy.from_config(config)
-    if policy.is_admin_user(operator_id):
-        return True
-    role = cached_member_role(group_openid, operator_id)
-    return (role or "") in GROUP_PRIVILEGED_ROLES
-
-
-def comma_command_to_call(line: str) -> ToolCall:
-    """Map a comma command to the tool Bub would run for it."""
-
-    from bub.builtin import tools as _builtin_tools  # noqa: F401
-    from bub.builtin.tools import resolve_tool_name
-    from bub.tools import REGISTRY
-
-    body = line[1:].strip() if line.startswith(",") else line.strip()
-    if not body:
-        return ToolCall(run_id="command", tool="help", arguments={})
-    try:
-        words = shlex.split(body)
-    except ValueError:
-        words = body.split()
-    name = words[0]
-    resolved = resolve_tool_name(name)
-    if resolved is None or resolved not in REGISTRY:
-        return ToolCall(run_id="command", tool="bash", arguments={"cmd": body})
-    arguments: dict[str, Any] = {}
-    for token in words[1:]:
-        if "=" in token:
-            key, value = token.split("=", 1)
-            arguments[key] = value
-    return ToolCall(run_id="command", tool=resolved, arguments=arguments)
-
-
-async def _enqueue_approval(
-    call: ToolCall,
-    state: dict[str, Any],
-    qq_state: dict[str, Any],
-    *,
-    deny_reason: str,
+    config: QQConfig,
+    session_id: str,
+    requester_name: str = "",
+    workspace: str = "",
     command_line: str = "",
-) -> ToolCallDecision:
-    session_id = str(qq_state.get("session_id") or state.get("session_id") or "")
-    sender_id = str(qq_state.get("sender_id") or "")
-    tool = call.tool
-    approval_id = uuid.uuid4().hex[:8]
-    group_openid = str(qq_state.get("group_openid") or "")
+    state: dict[str, Any] | None = None,
+) -> str:
+    """Post an approval card; return the text the caller reports back."""
+
     arguments = dict(call.arguments or {})
-    pending = PendingApproval(
-        id=approval_id,
-        tool=tool,
-        arguments=arguments,
-        session_id=session_id,
-        chat_id=f"group:{group_openid}",
-        requester_id=sender_id,
-        requester_name=str(qq_state.get("sender_name") or "").strip(),
-        group_openid=group_openid,
-        preview=(command_line.lstrip(",") if command_line else preview_call(tool, arguments)),
-        created_at=time.monotonic(),
-        state={
-            key: value
-            for key, value in state.items()
-            if key in {QQ_STATE_KEY, "_runtime_workspace", "session_id"}
-        },
-        workspace=str(state.get("_runtime_workspace") or ""),
-        command_line=command_line,
+    preview = preview_call(call.tool, arguments, command_line)
+    if len(preview) > PREVIEW_LIMIT:
+        logger.warning(
+            "qq.approval.too_long tool={} session_id={} length={}",
+            call.tool,
+            session_id,
+            len(preview),
+        )
+        return (
+            f"Not run: the command is longer than {PREVIEW_LIMIT} characters and"
+            " cannot be shown in full for approval. Split it into shorter steps."
+        )
+    chat_id = (
+        f"group:{requester.group_openid}"
+        if requester.scope == "group"
+        else f"c2c:{requester.sender_id}"
     )
-    _pending[approval_id] = pending
+    pending = PendingApproval(
+        id=uuid.uuid4().hex[:12],
+        tool=canonical_tool(call.tool),
+        arguments=arguments,
+        requester=requester,
+        session_id=session_id,
+        chat_id=chat_id,
+        preview=preview,
+        created_at=_clock(),
+        requester_name=requester_name,
+        workspace=workspace,
+        command_line=command_line,
+        state=dict(state or {}),
+    )
+    _pending[pending.id] = pending
     try:
-        await send_approval_message(pending)
+        await _send_approval_message(pending, config)
     except Exception as exc:
-        logger.warning("qq.approval.send_failed id={} error={}", approval_id, exc)
-        _pending.pop(approval_id, None)
-        return ToolCallDecision.deny(deny_reason)
+        logger.warning("qq.approval.send_failed id={} error={}", pending.id, exc)
+        _pending.pop(pending.id, None)
+        return "Not run: the approval card could not be sent."
     logger.info(
         "qq.approval.requested id={} tool={} session_id={} requester={}",
-        approval_id,
-        tool,
+        pending.id,
+        pending.tool,
         session_id,
-        sender_id,
+        requester.identity,
     )
-    return ToolCallDecision.replace(
-        f"已提交管理员审批（{approval_id}）。等待群主/管理员点击按钮后再执行。"
+    minutes = int(APPROVAL_TTL_SECONDS // 60)
+    return (
+        f"已提交管理员审批（{pending.id}），{minutes} 分钟内有效。"
+        "管理员批准后命令会执行，结果会发到聊天中。"
     )
 
 
-async def maybe_request_approval(
-    call: ToolCall,
-    state: dict[str, Any],
-    config: Any,
-) -> ToolCallDecision | None:
-    """Return a decision when this call should be queued for admin approval."""
-
-    qq_state = state.get(QQ_STATE_KEY)
-    if not isinstance(qq_state, dict):
-        return None
-    if not getattr(config, "exec_approval", True):
-        return None
-    if str(qq_state.get("scope") or "") != "group":
-        return None
-    reason = _approval_reason(call, state, qq_state, config)
-    if reason is None:
-        return None
-    return await _enqueue_approval(call, state, qq_state, deny_reason=reason)
-
-
-async def intercept_group_command(
-    message: ChannelMessage,
-    *,
-    config: Any,
-    workspace: Path,
-) -> bool:
-    """Queue a group comma command for admin approval.
-
-    Returns True when the caller must not forward the command into Bub.
-    Jail still decides whether a line is a command; this is the permission
-    layer. C2C and ``exec_approval=false`` keep immediate execution.
-    """
-
-    if message.kind != "command":
-        return False
-    if not getattr(config, "exec_approval", True):
-        return False
-    qq_context = message.context.get(QQ_CONTEXT_KEY)
-    if not isinstance(qq_context, dict) or str(qq_context.get("scope") or "") != "group":
-        return False
-    call = comma_command_to_call(message.content)
-    session_id = message.session_id
-    sender_id = str(qq_context.get("sender_id") or "")
-    if has_always_grant(session_id, sender_id, call.tool):
-        return False
-    state = {
-        QQ_STATE_KEY: {**qq_context, "session_id": session_id},
-        "session_id": session_id,
-        "_runtime_workspace": str(workspace),
-    }
-    decision = await _enqueue_approval(
-        call,
-        state,
-        state[QQ_STATE_KEY],
-        deny_reason="comma commands require admin approval",
-        command_line=message.content,
-    )
-    return decision is not None
-
-
-async def send_approval_message(pending: PendingApproval) -> None:
+async def _send_approval_message(pending: PendingApproval, config: QQConfig) -> None:
     from .outbound.media import build_outbound_context
     from .outbound.send_flow import is_delivered_send_result
 
     channel = get_active_channel()
     if channel is None:
         raise RuntimeError("QQ channel is not running")
+    approver_ids = (
+        group_admin_member_ids(config, pending.group_openid)
+        if pending.requester.scope == "group"
+        else None
+    )
+    minutes = int(APPROVAL_TTL_SECONDS // 60)
     body = (
-        f"## 命令执行审批\n\n"
+        "## 命令执行审批\n\n"
         f"- 工具: `{pending.tool}`\n"
         f"- 请求人: {pending.requester_name or pending.requester_id}\n"
-        f"- 预览:\n\n> {pending.preview}"
+        f"- 有效期: {minutes} 分钟，仅管理员可批准\n\n"
+        f"{_fenced(pending.preview)}"
     )
     result = await channel.send_for_result(
         ChannelMessage(
@@ -370,7 +311,9 @@ async def send_approval_message(pending: PendingApproval) -> None:
             channel=channel.name,
             chat_id=pending.chat_id,
             content=body,
-            context=build_outbound_context(keyboard=build_approval_keyboard(pending.id)),
+            context=build_outbound_context(
+                keyboard=build_approval_keyboard(pending.id, approver_ids=approver_ids)
+            ),
         )
     )
     if not is_delivered_send_result(result):
@@ -391,66 +334,46 @@ def begin_approval_click(
     *,
     approval_id: str,
     decision: str,
-    operator_id: str,
-    config: Any,
+    operator: Requester,
+    config: QQConfig,
 ) -> ApprovalClickPlan:
     pending = _pending.get(approval_id)
     if pending is None:
-        return ApprovalClickPlan(ack_code=1, notice="这条审批不存在或已经处理过。")
-    if time.monotonic() - pending.created_at > APPROVAL_TTL_SECONDS:
+        return ApprovalClickPlan(ack_code=ACK_FAILED, notice="这条审批不存在或已经处理过。")
+    if _clock() - pending.created_at > APPROVAL_TTL_SECONDS:
         _pending.pop(approval_id, None)
-        return ApprovalClickPlan(ack_code=1, notice="审批已过期。")
-    if not may_approve(
-        config,
-        operator_id=operator_id,
-        group_openid=pending.group_openid,
-        requester_id=pending.requester_id,
-    ):
+        return ApprovalClickPlan(ack_code=ACK_FAILED, notice="审批已过期。")
+    if not is_admin(config, operator):
         logger.warning(
-            "qq.approval.unauthorized id={} operator={}",
-            approval_id,
-            operator_id,
+            "qq.approval.unauthorized id={} operator={}", approval_id, operator.identity
         )
-        return ApprovalClickPlan(
-            ack_code=5,
-            notice="没有审批权限，仅群主或管理员可操作。",
-        )
+        return ApprovalClickPlan(ack_code=ACK_NO_PERMISSION, notice=None)
     _pending.pop(approval_id, None)
-    return ApprovalClickPlan(ack_code=0, pending=pending, decision=decision)
+    return ApprovalClickPlan(ack_code=ACK_OK, pending=pending, decision=decision)
 
 
 async def complete_approval_click(plan: ApprovalClickPlan) -> str | None:
     pending = plan.pending
-    decision = plan.decision
-    if pending is None or decision is None:
+    if pending is None or plan.decision is None:
         return plan.notice
-    key = grant_key(pending.session_id, pending.requester_id, pending.tool)
-    if decision == "deny":
+    if plan.decision == "deny":
         logger.info("qq.approval.denied id={} tool={}", pending.id, pending.tool)
-        return f"已拒绝 `{pending.tool}`。"
-    if decision == "allow-always":
-        _always_grants[key] = None
-        logger.info("qq.approval.always id={} tool={}", pending.id, pending.tool)
-    else:
-        logger.info("qq.approval.once id={} tool={}", pending.id, pending.tool)
+        return f"已拒绝 `{pending.tool}`（{pending.id}）。"
+    logger.info("qq.approval.allowed id={} tool={}", pending.id, pending.tool)
+    issue_token(pending)
     if pending.command_line:
         output = await _dispatch_approved_command(pending)
     else:
-        output = await _execute_pending(pending)
-    if decision == "allow-always":
-        header = f"已始终允许 `{pending.tool}`。"
-    else:
-        header = f"已允许一次 `{pending.tool}`。"
-    if not output:
-        return header
-    return f"{header}\n\n{output}"
+        output = await execute_approved_call(pending)
+    header = f"已允许 `{pending.tool}`（{pending.id}）。"
+    return f"{header}\n\n{output}" if output else header
 
 
 async def _dispatch_approved_command(pending: PendingApproval) -> str:
     channel = get_active_channel()
     dispatch = getattr(channel, "dispatch_approved_command", None)
-    if channel is None or dispatch is None:
-        return await _execute_pending(pending)
+    if dispatch is None:
+        return "执行失败: QQ 渠道未运行。"
     try:
         await dispatch(pending)
     except Exception as exc:
@@ -459,25 +382,34 @@ async def _dispatch_approved_command(pending: PendingApproval) -> str:
     return ""
 
 
-async def resolve_approval_click(
-    *,
-    approval_id: str,
-    decision: str,
-    operator_id: str,
-    config: Any,
-) -> str | None:
-    """Test helper: auth + execute without the OpenAPI PUT."""
+async def execute_approved_call(pending: PendingApproval) -> str:
+    """Run an approved model tool call after the Guard accepts its token."""
 
-    plan = begin_approval_click(
-        approval_id=approval_id,
-        decision=decision,
-        operator_id=operator_id,
+    import bub
+
+    from .config import QQConfig
+    from .guard import evaluate
+    from .store import resolve_state_path
+
+    config = bub.ensure_config(QQConfig)
+    call = ToolCall(run_id=pending.id, tool=pending.tool, arguments=pending.arguments)
+    workspace = Path(pending.workspace or Path.cwd())
+    decision = evaluate(
+        call,
+        pending.requester,
         config=config,
+        workspace=workspace,
+        protected=(resolve_state_path(config),),
+        approved=consume_token(pending.session_id, pending.requester, call),
     )
-    return await complete_approval_click(plan)
-
-
-async def _execute_pending(pending: PendingApproval) -> str:
+    if not decision.allowed:
+        logger.warning(
+            "qq.approval.guard_denied id={} tool={} reason={}",
+            pending.id,
+            pending.tool,
+            decision.reason,
+        )
+        return f"未执行: {decision.reason}"
     try:
         from bub.builtin.tools import resolve_tool_name
         from bub.tape import AsyncTapeStoreAdapter
@@ -492,22 +424,16 @@ async def _execute_pending(pending: PendingApproval) -> str:
         tool_obj = REGISTRY.get(resolved)
         if tool_obj is None:
             return f"找不到工具 `{pending.tool}`。"
-        workspace = pending.workspace or str(Path.cwd())
         state = dict(pending.state)
-        state["_runtime_workspace"] = workspace
+        state["_runtime_workspace"] = str(workspace)
         state["session_id"] = pending.session_id
         store = AsyncTapeStoreAdapter(InMemoryTapeStore())
-        tape = Tape(
-            Path(workspace),
-            store,
-            TapeContext(state=state),
-            _name=pending.session_id,
-        )
+        tape = Tape(workspace, store, TapeContext(state=state), _name=pending.session_id)
         context = ToolContext(tape=tape, run_id=pending.id, state=state)
-        executor = ToolExecutor(hooks=None)
-        execution = await executor.execute_async(
-            [(tool_obj, pending.arguments)],
-            context=context,
+        # The Guard already ran on this exact call above; hooks would only
+        # re-open the approval flow for it.
+        execution = await ToolExecutor(hooks=None).execute_async(
+            [(tool_obj, pending.arguments)], context=context
         )
     except Exception as exc:
         logger.warning("qq.approval.execute_failed id={} error={}", pending.id, exc)

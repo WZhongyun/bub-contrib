@@ -9,9 +9,7 @@ all behave exactly as in direct mode.
 
 Tools registered with ``agent_use=False`` are ops comma commands: they
 never appear in the model's tool list and can only be requested as
-``,name`` by senders who pass the comma-command gate (group
-owners/admins or ``admin_users``). In groups with ``exec_approval``,
-that request still waits for an admin keyboard tap.
+``,name`` by admins; every comma command still passes the Guard.
 """
 
 from __future__ import annotations

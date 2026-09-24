@@ -3,9 +3,8 @@
 How the pieces fit together:
 
 - Inbound services consult :class:`QQAccessPolicy` to drop messages from
-  senders/groups outside the configured allowlists and to gate comma
-  commands (fail-closed: with no configuration, only group owners/admins
-  keep command access in groups and nobody keeps it in C2C).
+  senders/groups outside the configured allowlists. Who is trusted, and
+  what each call may touch, is decided by :mod:`bub_qq.guard`.
 - Inbound adaptation stores QQ metadata on ``ChannelMessage.context``
   under :data:`QQ_CONTEXT_KEY`; the ``load_state`` hook copies it into
   ``TurnState`` under :data:`QQ_STATE_KEY` so the agent-loop interception
@@ -19,7 +18,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .session import BoundedDict
 
@@ -28,8 +27,6 @@ if TYPE_CHECKING:
 
 QQ_CONTEXT_KEY = "_qq"
 QQ_STATE_KEY = "qq"
-
-GROUP_PRIVILEGED_ROLES = frozenset({"owner", "admin"})
 
 # The channel reply tool is exempt from every tool policy: sending a reply
 # was never gated in direct mode, and denying it under reply_mode="tool"
@@ -65,29 +62,28 @@ def parse_id_list(raw: str) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class QQAccessPolicy:
-    """Who may reach the bot and who may run comma commands."""
+    """Which chats may reach the bot at all (allowlists).
 
-    admin_users: frozenset[str] = frozenset()
+    Trust (admins) is decided by :mod:`bub_qq.guard`; callers let admins
+    through the C2C allowlist themselves.
+    """
+
     allow_users: frozenset[str] = frozenset()
     allow_groups: frozenset[str] = frozenset()
 
     @classmethod
     def from_config(cls, config: QQConfig) -> QQAccessPolicy:
         return cls(
-            admin_users=parse_id_list(config.admin_users),
             allow_users=parse_id_list(config.allow_users),
             allow_groups=parse_id_list(config.allow_groups),
         )
-
-    def is_admin_user(self, user_openid: str) -> bool:
-        return user_openid in self.admin_users
 
     def user_allowed(self, user_openid: str) -> bool:
         """C2C sender check. An empty allowlist means no restriction."""
 
         if not self.allow_users:
             return True
-        return user_openid in self.allow_users or user_openid in self.admin_users
+        return user_openid in self.allow_users
 
     def group_allowed(self, group_openid: str) -> bool:
         """Group check. An empty allowlist means no restriction."""
@@ -95,17 +91,6 @@ class QQAccessPolicy:
         if not self.allow_groups:
             return True
         return group_openid in self.allow_groups
-
-    def may_run_command(
-        self, *, scope: str, sender_id: str, sender_role: str | None = None
-    ) -> bool:
-        """Whether this sender may run comma commands (fail-closed)."""
-
-        if self.is_admin_user(sender_id):
-            return True
-        if scope == "group":
-            return (sender_role or "") in GROUP_PRIVILEGED_ROLES
-        return False
 
 
 def denied_tool_reason(
@@ -126,38 +111,6 @@ def denied_tool_reason(
         if any(fnmatchcase(form, pattern) for form in forms):
             return f"Tool '{tool}' is not allowed in this chat."
     return None
-
-
-def evaluate_tool_call(
-    config: QQConfig, qq_state: dict[str, Any], tool: str
-) -> str | None:
-    """Return a denial message for one tool call, or ``None`` to proceed.
-
-    Senders who may run comma commands (configured admins, group
-    owners/admins) bypass the tool policy entirely, matching the command
-    gate semantics.
-    """
-
-    if REPLY_TOOL_NAME in _tool_name_forms(tool):
-        return None
-    policy = QQAccessPolicy.from_config(config)
-    sender_id = str(qq_state.get("sender_id") or "")
-    scope = str(qq_state.get("scope") or "")
-    sender_role = qq_state.get("sender_role")
-    if policy.may_run_command(
-        scope=scope,
-        sender_id=sender_id,
-        sender_role=sender_role if isinstance(sender_role, str) else None,
-    ):
-        return None
-    tool_policy = (
-        config.group_tool_policy if scope == "group" else config.c2c_tool_policy
-    )
-    return denied_tool_reason(
-        tool=tool,
-        tool_policy=tool_policy,
-        extra_denied_patterns=parse_id_list(config.denied_tools),
-    )
 
 
 class SlidingWindowRateLimiter:

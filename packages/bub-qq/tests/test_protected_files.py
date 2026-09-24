@@ -9,13 +9,10 @@ from bub.channels.message import ChannelMessage
 from bub.hooks.interception import ToolCall
 
 from bub_qq import plugin
-from bub_qq.approval import _always_grants
-from bub_qq.approval import grant_key
 from bub_qq.approval import reset_approval_state
 from bub_qq.config import QQConfig
 from bub_qq.runtime import set_active_channel
 from bub_qq.security import QQ_STATE_KEY
-from bub_qq.workspace import command_escapes_workspace
 from bub_qq.workspace import sensitive_path_reason
 
 
@@ -35,8 +32,9 @@ def _config(**overrides: object) -> QQConfig:
         "admin_users": "admin-1",
         "group_tool_policy": "open",
         "c2c_tool_policy": "open",
-        "exec_approval": True,
-        "workspace_jail": False,
+        "group_shell": "approval",
+        "c2c_access": "admin_users",
+        "denied_tools": "",
         "state_file": "",
     }
     values.update(overrides)
@@ -91,15 +89,14 @@ def _decide(call: ToolCall, state: dict):
         ("qq_send", {"content": "", "media_path": ".env"}),
     ],
 )
-def test_protected_files_are_denied_even_with_grants_and_trust(
+def test_protected_files_are_denied_even_for_admins(
     monkeypatch, workspace: Path, tool: str, arguments: dict
 ) -> None:
     monkeypatch.setattr(bub, "ensure_config", lambda cls: _config())
     channel = FakeChannel()
     set_active_channel(channel)
-    # A configured admin who also holds an always-allow grant for the tool.
+    # A configured admin: trust never unlocks protected files.
     state = _state(workspace, sender="admin-1")
-    _always_grants[grant_key("qq:group:group-1", "admin-1", tool)] = None
 
     decision = _decide(ToolCall(run_id="r", tool=tool, arguments=arguments), state)
 
@@ -157,12 +154,6 @@ def test_ordinary_files_still_pass(monkeypatch, workspace: Path) -> None:
         )
         is None
     )
-
-
-def test_comma_fs_command_on_protected_file_is_blocked(workspace: Path) -> None:
-    assert command_escapes_workspace(",fs.read path=.env", workspace) is not None
-    assert command_escapes_workspace(",fs.read .git/config", workspace) is not None
-    assert command_escapes_workspace(",fs.read path=notes.md", workspace) is None
 
 
 def test_sensitive_path_reason_matches_names_not_substrings(tmp_path: Path) -> None:

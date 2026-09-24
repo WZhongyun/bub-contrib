@@ -27,12 +27,16 @@ from .inbound.interaction import build_interaction_channel_message
 from .inbound.interaction import extract_claw_cfg_update
 from .approval import PendingApproval
 from .approval import begin_approval_click
+from .approval import comma_command_to_call
 from .approval import complete_approval_click
-from .approval import intercept_group_command
+from .approval import consume_token
 from .approval import parse_approval_button
+from .approval import request_approval
 from .approval import send_notice
+from .guard import Requester
+from .guard import evaluate
+from .guard import is_admin
 from .inbound.interaction import parse_interaction_event
-from .inbound.persist import persist_inbound_attachments
 from .outbound.c2c import QQC2CSendService
 from .outbound.group import QQGroupSendService
 from .protocol.auth import QQTokenProvider
@@ -88,8 +92,7 @@ class QQChannel(Channel):
             state=self._session_state,
             policy=self._policy,
             suppress_direct_output=suppress_direct_output,
-            workspace=self._workspace,
-            workspace_jail=self._config.workspace_jail,
+            is_admin=self._is_admin,
         )
         self._group_inbound = QQGroupInboundService(
             channel_name=self.name,
@@ -97,8 +100,7 @@ class QQChannel(Channel):
             state=self._session_state,
             policy=self._policy,
             suppress_direct_output=suppress_direct_output,
-            workspace=self._workspace,
-            workspace_jail=self._config.workspace_jail,
+            is_admin=self._is_admin,
         )
         self._c2c_send = QQC2CSendService(
             channel_name=self.name,
@@ -224,13 +226,6 @@ class QQChannel(Channel):
         if parsed is None:
             return
         message, channel_message = parsed
-        if self._config.workspace_jail and message.attachments:
-            channel_message.content = await persist_inbound_attachments(
-                channel_message.content,
-                message.attachments,
-                workspace=self._workspace,
-                message_id=message.message_id,
-            )
         logger.info(
             "qq.c2c.inbound session_id={} user_openid={} content_len={} attachments={}",
             channel_message.session_id,
@@ -238,6 +233,10 @@ class QQChannel(Channel):
             len(message.content),
             len(message.attachments),
         )
+        if channel_message.kind == "command" and not await self._admit_command(
+            channel_message
+        ):
+            return
         await self._on_receive(channel_message)
 
     async def _handle_group_message(self, payload: dict[str, Any]) -> None:
@@ -245,13 +244,6 @@ class QQChannel(Channel):
         if parsed is None:
             return
         message, channel_message = parsed
-        if self._config.workspace_jail and message.attachments:
-            channel_message.content = await persist_inbound_attachments(
-                channel_message.content,
-                message.attachments,
-                workspace=self._workspace,
-                message_id=message.message_id,
-            )
         logger.info(
             "qq.group.inbound session_id={} group_openid={} member_openid={} was_mentioned={} is_active={} content_len={}",
             channel_message.session_id,
@@ -261,34 +253,89 @@ class QQChannel(Channel):
             channel_message.is_active,
             len(message.content),
         )
-        if await intercept_group_command(
-            channel_message, config=self._config, workspace=self._workspace
+        if channel_message.kind == "command" and not await self._admit_command(
+            channel_message
         ):
             return
         await self._on_receive(channel_message)
 
+    def _is_admin(self, requester: Requester) -> bool:
+        return is_admin(self._config, requester)
+
+    async def _admit_command(self, message: ChannelMessage) -> bool:
+        """Run a comma command past the Guard; True when Bub may execute it.
+
+        Bub executes comma commands without tool hooks, so this is the only
+        place their Guard check can happen.
+        """
+
+        qq_context = message.context.get(QQ_CONTEXT_KEY)
+        if not isinstance(qq_context, dict):
+            return False
+        requester = Requester.from_state(qq_context)
+        try:
+            call = comma_command_to_call(message.content)
+        except ValueError:
+            await send_notice(message.session_id, message.chat_id, "命令为空。")
+            return False
+        decision = evaluate(
+            call,
+            requester,
+            config=self._config,
+            workspace=self._workspace,
+            protected=(resolve_state_path(self._config),),
+        )
+        if decision.action == "approval":
+            if consume_token(message.session_id, requester, call):
+                return True
+            reply = await request_approval(
+                call,
+                requester,
+                config=self._config,
+                session_id=message.session_id,
+                requester_name=str(qq_context.get("sender_name") or "").strip(),
+                workspace=str(self._workspace),
+                command_line=message.content,
+            )
+            if reply.startswith("Not run"):
+                await send_notice(message.session_id, message.chat_id, reply)
+            return False
+        if decision.allowed:
+            return True
+        logger.warning(
+            "qq.command.denied session_id={} requester={} tool={} reason={}",
+            message.session_id,
+            requester.identity,
+            call.tool,
+            decision.reason,
+        )
+        await send_notice(
+            message.session_id, message.chat_id, f"命令未执行：{decision.reason}"
+        )
+        return False
+
     async def dispatch_approved_command(self, pending: PendingApproval) -> None:
-        """Run an approved comma command through the real Bub turn (real tape)."""
+        """Re-submit an approved comma command; the Guard consumes its token."""
 
         qq_context = {
-            "scope": "group",
-            "sender_id": pending.requester_id,
+            "scope": pending.requester.scope,
+            "sender_id": pending.requester.sender_id,
             "sender_name": pending.requester_name,
-            "sender_role": "admin",
-            "group_openid": pending.group_openid,
             "session_id": pending.session_id,
         }
-        await self._on_receive(
-            ChannelMessage(
-                session_id=pending.session_id,
-                content=pending.command_line,
-                channel=self.name,
-                chat_id=pending.chat_id,
-                kind="command",
-                is_active=True,
-                context={QQ_CONTEXT_KEY: qq_context},
-            )
+        if pending.requester.group_openid:
+            qq_context["group_openid"] = pending.requester.group_openid
+        message = ChannelMessage(
+            session_id=pending.session_id,
+            content=pending.command_line,
+            channel=self.name,
+            chat_id=pending.chat_id,
+            kind="command",
+            is_active=True,
+            context={QQ_CONTEXT_KEY: qq_context},
         )
+        if await self._admit_command(message):
+            await self._on_receive(message)
 
     async def _handle_interaction(self, payload: dict[str, Any]) -> None:
         event = parse_interaction_event(payload)
@@ -336,13 +383,21 @@ class QQChannel(Channel):
             parsed = parse_approval_button(button_data)
             if parsed is not None:
                 approval_id, decision = parsed
-                operator_id = str(
-                    event.get("group_member_openid") or event.get("user_openid") or ""
-                )
+                group_openid = str(event.get("group_openid") or "")
+                if group_openid:
+                    operator = Requester(
+                        scope="group",
+                        sender_id=str(event.get("group_member_openid") or ""),
+                        group_openid=group_openid,
+                    )
+                else:
+                    operator = Requester(
+                        scope="c2c", sender_id=str(event.get("user_openid") or "")
+                    )
                 plan = begin_approval_click(
                     approval_id=approval_id,
                     decision=decision,
-                    operator_id=operator_id,
+                    operator=operator,
                     config=self._config,
                 )
                 try:

@@ -165,3 +165,67 @@ def test_media_spec_rejects_private_literal_early() -> None:
     spec, error = media_spec_from_args("http://169.254.169.254/latest/meta-data")
     assert spec is None
     assert error == "Not sent: media_url must point to a public internet address."
+
+
+def _fetch_decision(url: str, monkeypatch, allow_hosts: str = ""):
+    import bub
+    from bub.hooks.interception import ToolCall
+
+    from bub_qq import plugin
+    from bub_qq.config import QQConfig
+
+    config = QQConfig.model_construct(
+        admin_users="",
+        group_tool_policy="restricted",
+        c2c_tool_policy="open",
+        denied_tools="",
+        group_shell="approval",
+        c2c_access="admin_users",
+        state_file="",
+        download_allow_hosts=allow_hosts,
+    )
+    monkeypatch.setattr(bub, "ensure_config", lambda cls: config)
+    state = {
+        "qq": {"scope": "group", "sender_id": "m", "group_openid": "g", "session_id": "s"},
+        "_runtime_workspace": "/tmp",
+    }
+    call = ToolCall(run_id="r", tool="web_fetch", arguments={"url": url})
+    return asyncio.run(plugin.before_tool_call(call, state))
+
+
+def test_web_fetch_to_loopback_is_refused_by_default(monkeypatch) -> None:
+    blocked = _fetch_decision("http://127.0.0.1:9/file", monkeypatch)
+    assert blocked is not None and blocked.action == "deny"
+    assert "refused" in blocked.message
+
+
+def test_web_fetch_follows_redirects_through_the_guard(monkeypatch, tmp_path) -> None:
+    import threading
+
+    ready = threading.Event()
+    holder: dict = {}
+
+    def serve() -> None:
+        loop = asyncio.new_event_loop()
+        server = TestServer(_redirect_app(), host="127.0.0.1")
+        loop.run_until_complete(server.start_server())
+        holder.update(loop=loop, server=server)
+        ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    ready.wait(5)
+    base = str(holder["server"].make_url(""))
+    try:
+        ok = _fetch_decision(f"{base}/hop", monkeypatch, allow_hosts="127.0.0.1")
+        assert ok is not None and ok.action == "replace"
+        assert ok.result == "payload"
+        # The allowed host redirects to a host that is not allowed.
+        evil = _fetch_decision(f"{base}/evil", monkeypatch, allow_hosts="127.0.0.1")
+        assert evil is not None and evil.action == "deny"
+    finally:
+        loop = holder["loop"]
+        asyncio.run_coroutine_threadsafe(holder["server"].close(), loop).result(5)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(5)

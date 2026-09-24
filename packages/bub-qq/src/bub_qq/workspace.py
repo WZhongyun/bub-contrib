@@ -1,15 +1,16 @@
-"""Workspace jail: Bub cwd (pwd) is the root for QQ file and shell tools.
+"""Workspace paths: where QQ file tools may act and where artifacts live.
 
-The framework already puts ``_runtime_workspace`` on turn state (cwd, or
-``bub --workspace``). This module refuses paths and command tokens that
-resolve outside that directory. Chat-role privilege does not bypass it.
+The framework puts ``_runtime_workspace`` on turn state (cwd, or
+``bub --workspace``). File tools stay inside it, protected files inside it
+are never touched, and plugin-written files go under ``inbox/`` and
+``outbox/``. Shell commands are not inspected here: string analysis cannot
+confine a shell, so shell access is an explicit Guard decision instead.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import shlex
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -28,32 +29,6 @@ _FS_TOOLS = frozenset(
     {"fs.read", "fs.write", "fs.edit", "fs_read", "fs_write", "fs_edit"}
 )
 _SENSITIVE_DIR_NAMES = frozenset({".git"})
-_BASH_TOOLS = frozenset({"bash", "bash.output", "bash.kill", "bash_output", "bash_kill"})
-# Names that are not shell. This is not a permission grant: group comma
-# commands still go through exec_approval before Bub runs them.
-_NON_SHELL_COMMANDS = frozenset(
-    {
-        "help",
-        "quit",
-        "model",
-        "reasoning_effort",
-        "skill",
-        "qq.version",
-        "qq.send",
-        "web.fetch",
-        "web_fetch",
-        "tape.info",
-        "tape.search",
-        "tape.reset",
-        "tape.handoff",
-        "tape.anchors",
-        "tape_info",
-        "tape_search",
-        "tape_reset",
-        "tape_handoff",
-        "tape_anchors",
-    }
-)
 
 
 def workspace_from_state(state: TurnState | dict[str, Any] | None) -> Path:
@@ -88,81 +63,6 @@ def resolve_in_workspace(
     if not path_inside_workspace(resolved, workspace):
         return None
     return resolved
-
-
-def tool_escapes_workspace(call: ToolCall, workspace: Path) -> str | None:
-    """Denial message when a tool call would leave ``workspace``, else None."""
-
-    name = call.tool.replace("_", ".", 1) if "_" in call.tool else call.tool
-    args = call.arguments if isinstance(call.arguments, dict) else {}
-    if name in _FS_TOOLS or call.tool in _FS_TOOLS:
-        return _path_arg_denied(args.get("path"), workspace)
-    if name == "bash" or call.tool == "bash":
-        return bash_escapes_workspace(
-            cmd=str(args.get("cmd") or ""),
-            cwd=args.get("cwd"),
-            workspace=workspace,
-        )
-    if name == "qq.send" or call.tool in {"qq.send", "qq_send"}:
-        return _path_arg_denied(args.get("media_path"), workspace)
-    return None
-
-
-def command_escapes_workspace(line: str, workspace: Path) -> str | None:
-    """Denial message when a comma-command would leave ``workspace``."""
-
-    body = line[1:].strip() if line.startswith(",") else line.strip()
-    if not body:
-        return None
-    try:
-        words = shlex.split(body)
-    except ValueError:
-        words = body.split()
-    if not words:
-        return None
-    name = words[0]
-    parsed = _command_args(words[1:])
-    if name in _FS_TOOLS:
-        path = parsed.get("path")
-        if path is None and parsed["positional"]:
-            path = parsed["positional"][0]
-        return _path_arg_denied(path, workspace)
-    if name in _BASH_TOOLS:
-        if name not in {"bash"}:
-            return None
-        cmd = parsed.get("cmd")
-        if cmd is None:
-            cmd = " ".join(parsed["positional"])
-        return bash_escapes_workspace(
-            cmd=str(cmd or ""),
-            cwd=parsed.get("cwd"),
-            workspace=workspace,
-        )
-    if name in _NON_SHELL_COMMANDS:
-        return None
-    return bash_escapes_workspace(cmd=body, cwd=None, workspace=workspace)
-
-
-def bash_escapes_workspace(
-    *, cmd: str, cwd: object, workspace: Path
-) -> str | None:
-    cwd_path = workspace
-    if cwd is not None and str(cwd).strip():
-        resolved_cwd = resolve_in_workspace(str(cwd), workspace)
-        if resolved_cwd is None:
-            return (
-                f"cwd '{cwd}' is outside the workspace ({workspace}). "
-                "QQ file and shell tools are confined to the process working directory."
-            )
-        cwd_path = resolved_cwd
-    for token in _path_like_tokens(cmd):
-        resolved = resolve_in_workspace(token, workspace, cwd=cwd_path)
-        if resolved is None:
-            return (
-                f"path '{token}' is outside the workspace ({workspace}). "
-                "QQ file and shell tools are confined to the process working directory."
-            )
-    return None
 
 
 def is_unsafe_artifact_workspace(workspace: Path) -> bool:
@@ -272,8 +172,8 @@ def tool_protected_reason(
 ) -> str | None:
     """Hard denial for protected files and disallowed media, else None.
 
-    Unlike :func:`tool_escapes_workspace` this never becomes an approval
-    request and does not depend on ``workspace_jail``.
+    The Guard checks this before anything else, so it never becomes an
+    approval request and no identity bypasses it.
     """
 
     args = call.arguments if isinstance(call.arguments, dict) else {}
@@ -298,48 +198,3 @@ def tool_protected_reason(
 def _resolve_from(raw: str, workspace: Path) -> Path:
     path = Path(raw).expanduser()
     return path.resolve() if path.is_absolute() else (workspace / path).resolve()
-
-
-def _path_arg_denied(raw: object, workspace: Path) -> str | None:
-    if raw is None or not str(raw).strip():
-        return None
-    text = str(raw).strip()
-    if resolve_in_workspace(text, workspace) is None:
-        return (
-            f"path '{text}' is outside the workspace ({workspace}). "
-            "QQ file and shell tools are confined to the process working directory."
-        )
-    return sensitive_path_reason(_resolve_from(text, workspace))
-
-
-def _path_like_tokens(cmd: str) -> list[str]:
-    if not cmd.strip():
-        return []
-    try:
-        words = shlex.split(cmd)
-    except ValueError:
-        words = cmd.split()
-    tokens: list[str] = []
-    for index, word in enumerate(words):
-        if index == 0:
-            continue
-        if word.startswith("-"):
-            continue
-        lowered = word.lower()
-        if lowered.startswith("http://") or lowered.startswith("https://"):
-            continue
-        if word.startswith("/") or word.startswith("~") or "/" in word or word in {".", ".."}:
-            tokens.append(word)
-    return tokens
-
-
-def _command_args(tokens: list[str]) -> dict[str, Any]:
-    positional: list[str] = []
-    kwargs: dict[str, Any] = {"positional": positional}
-    for token in tokens:
-        if "=" in token:
-            key, value = token.split("=", 1)
-            kwargs[key] = value
-        else:
-            positional.append(token)
-    return kwargs

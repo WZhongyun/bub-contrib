@@ -8,6 +8,9 @@ from pydantic_settings import SettingsConfigDict
 
 type ToolPolicy = Literal["open", "restricted", "locked"]
 type ReplyMode = Literal["direct", "tool"]
+type GroupShell = Literal["deny", "approval"]
+type ShellSandbox = Literal["none", "external"]
+type C2CAccess = Literal["admin_users", "allow_users"]
 
 
 @bub.config(name="qq")
@@ -96,9 +99,12 @@ class QQConfig(bub.Settings):
     admin_users: str = Field(
         default="",
         description=(
-            "Comma-separated user openids with full comma-command and tool"
-            " access in every scope. Comma commands from anyone else are"
-            " treated as plain text (in groups, owners/admins also qualify)."
+            "Comma-separated admins, the only trusted senders. Entries are"
+            " scoped identities ('c2c:<user_openid>',"
+            " 'group:<group_openid>:<member_openid>') or bare openids that"
+            " match in any scope. QQ group owners/admins are not trusted"
+            " unless listed here or registered with ,qq.claim. Comma commands"
+            " from anyone else are treated as plain text."
         ),
     )
     allow_users: str = Field(
@@ -115,24 +121,57 @@ class QQConfig(bub.Settings):
             " other groups are dropped. Empty allows every group."
         ),
     )
-    exec_approval: bool = Field(
-        default=True,
+    group_shell: GroupShell = Field(
+        default="approval",
         description=(
-            "When a group member's tool call is blocked by group_tool_policy, "
-            "or an authorized sender types a comma command, send a fixed admin "
-            "keyboard instead of running immediately. Group owners/admins also "
-            "go through approval (they may tap their own request). "
-            "Workspace-jail escapes are included. Does not apply to C2C; "
-            "locked policy still denies other tools."
+            "Shell (bash) access for admins: 'approval' asks an admin to"
+            " confirm every command on a keyboard card (no always-allow),"
+            " 'deny' refuses shell entirely. Non-admins never get a shell."
+            " Applies in groups and in C2C."
+        ),
+    )
+    shell_sandbox: ShellSandbox = Field(
+        default="none",
+        description=(
+            "Declare whether bash runs inside an external sandbox (container,"
+            " bwrap, ...). The plugin cannot verify this and does not isolate"
+            " commands itself; 'none' logs a warning when shell is enabled."
+        ),
+    )
+    c2c_access: C2CAccess = Field(
+        default="admin_users",
+        description=(
+            "Who may use tools in C2C: 'admin_users' (admins only) or"
+            " 'allow_users' (everyone in the non-empty allow_users list)."
+            " Replies via qq.send always work."
+        ),
+    )
+    download_allow_hosts: str = Field(
+        default="",
+        description=(
+            "Comma-separated hostnames qq.send media_url may fetch even when"
+            " they resolve to a private address (e.g. an intranet image"
+            " host). Every other host must be a public internet address."
+        ),
+    )
+    exec_approval: bool | None = Field(
+        default=None,
+        description="Removed in 0.3.0; replaced by group_shell. Ignored with a warning.",
+    )
+    workspace_jail: bool | None = Field(
+        default=None,
+        description=(
+            "Removed in 0.3.0; replaced by the Guard allowlists and"
+            " shell_sandbox. Ignored with a warning."
         ),
     )
     group_tool_policy: ToolPolicy = Field(
         default="restricted",
         description=(
-            "Tool policy for group sessions: 'open' allows all tools,"
-            " 'restricted' queues shell/file-write/subagent tools for"
-            " approval, 'locked' denies every tool. With exec_approval,"
-            " owners/admins also confirm via the keyboard."
+            "Policy for tools other than shell and files in group sessions:"
+            " 'open' allows them, 'restricted' denies subagent and"
+            " denied_tools, 'locked' denies all of them. Applies to admins"
+            " too; shell and file access follow group_shell and the Guard."
         ),
     )
     c2c_tool_policy: ToolPolicy = Field(
@@ -144,16 +183,6 @@ class QQConfig(bub.Settings):
         description=(
             "Extra comma-separated tool-name glob patterns denied under the"
             " 'restricted' policy, e.g. 'web.fetch,tape.*'."
-        ),
-    )
-    workspace_jail: bool = Field(
-        default=True,
-        description=(
-            "Refuse file/shell tool arguments and comma commands that resolve"
-            " outside the Bub workspace (process cwd / pwd). Privileged"
-            " senders still bypass tool-policy tiers, but not this jail."
-            " Inbound attachments are saved under <workspace>/inbox/"
-            " (or <bub home>/qq/inbox/ when cwd is /, $HOME, or unwritable)."
         ),
     )
     llm_rate_limit_per_minute: int = Field(
