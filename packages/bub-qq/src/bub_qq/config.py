@@ -39,7 +39,7 @@ class QQConfig(bub.Settings):
     webhook_callback_timeout_seconds: float = 15.0
     verify_signature: bool = True
     webhook_signature_timestamp_tolerance_seconds: float = Field(
-        default=0.0,
+        default=300.0,
         ge=0,
         description=(
             "Reject webhook requests whose signature timestamp deviates from local"

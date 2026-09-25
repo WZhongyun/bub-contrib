@@ -464,3 +464,15 @@ def test_c2c_admin_shell_command_asks_in_private_chat(channel_env) -> None:
     assert received == []
     assert len(sent) == 1 and sent[0].chat_id == "c2c:u-admin"
     assert _only_pending().requester == Requester(scope="c2c", sender_id="u-admin")
+
+
+def test_admin_web_fetch_command_uses_the_guarded_fetcher(channel_env) -> None:
+    channel, received, sent = channel_env
+    asyncio.run(
+        channel._handle_transport_payload(
+            _group_command(",web.fetch http://169.254.169.254/latest/meta-data", message_id="f")
+        )
+    )
+    # Not handed to Bub (whose web.fetch follows redirects anywhere).
+    assert received == []
+    assert "web.fetch refused" in sent[-1].content

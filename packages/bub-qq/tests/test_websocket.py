@@ -258,3 +258,38 @@ def test_identify_rate_limit_waits_for_next_window() -> None:
         assert clock.now == 5.0
 
     asyncio.run(_run())
+
+
+def test_fatal_error_stops_qq_but_not_the_gateway() -> None:
+    from bub_qq.protocol.auth import QQAuthError
+
+    async def _run() -> None:
+        client = QQWebSocketClient(QQConfig.model_construct(), openapi=None, on_payload=None)
+
+        async def broken_login() -> list:
+            raise QQAuthError("qq token request failed: http=401")
+
+        client._resolve_shard_specs = broken_login
+        gateway_stop = asyncio.Event()
+        await client.start(gateway_stop)
+        await asyncio.wait_for(client._task, timeout=2)
+
+        assert client._should_stop()
+        assert not gateway_stop.is_set()  # other channels keep running
+
+    asyncio.run(_run())
+
+
+def test_gateway_stop_event_still_stops_the_client() -> None:
+    async def _run() -> None:
+        client = QQWebSocketClient(QQConfig.model_construct(), openapi=None, on_payload=None)
+        gateway_stop = asyncio.Event()
+        client._external_stop = gateway_stop
+        client._stop_event = asyncio.Event()
+        watcher = asyncio.create_task(client._watch_stop_event())
+        await asyncio.sleep(0)
+        gateway_stop.set()
+        with pytest.raises(Exception, match="stop requested"):
+            await asyncio.wait_for(watcher, timeout=2)
+
+    asyncio.run(_run())

@@ -469,3 +469,39 @@ def test_channel_send_routes_group_messages() -> None:
     asyncio.run(_run())
     configure._global_config.clear()
     configure._config_data.clear()
+
+
+def test_framework_errors_reach_the_chat_only_as_a_generic_notice(tmp_path, monkeypatch) -> None:
+    from bub_qq.channel import ERROR_NOTICE
+
+    monkeypatch.chdir(tmp_path)
+    configure.merge(
+        configure._config_data,
+        {"qq": {"receive_mode": "webhook", "state_file": str(tmp_path / "s.json")}},
+    )
+    configure._global_config.clear()
+    try:
+        channel = QQChannel(lambda message: None)
+        delivered: list[ChannelMessage] = []
+
+        async def capture(message: ChannelMessage) -> dict[str, object]:
+            delivered.append(message)
+            return {"id": "sent"}
+
+        channel._group_send.send = capture
+        asyncio.run(
+            channel.send(
+                ChannelMessage(
+                    session_id="qq:group:g1",
+                    channel="qq",
+                    chat_id="group:g1",
+                    content="An error occurred at stage 'run_model': 401 key=sk-live-123",
+                    kind="error",
+                )
+            )
+        )
+        assert [m.content for m in delivered] == [ERROR_NOTICE]
+        assert "sk-live" not in delivered[0].content
+    finally:
+        configure._global_config.clear()
+        configure._config_data.clear()

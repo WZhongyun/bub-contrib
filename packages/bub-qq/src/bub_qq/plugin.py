@@ -1,6 +1,5 @@
 from typing import Any
 
-import aiohttp
 import bub
 from bub import hookimpl
 from bub import inquirer as bub_inquirer
@@ -25,9 +24,7 @@ from .security import SlidingWindowRateLimiter
 from .approval import request_approval
 from .guard import Requester
 from .guard import evaluate
-from .netguard import BlockedAddressError
-from .netguard import download_allow_hosts
-from .netguard import fetch_text
+from .netguard import web_fetch_for_call
 from .store import resolve_state_path
 from .workspace import artifact_root
 from .workspace import workspace_from_state
@@ -233,29 +230,13 @@ async def before_tool_call(
 
 
 async def _guarded_web_fetch(call: ToolCall) -> ToolCallDecision:
-    """Run ``web.fetch`` ourselves, restricted to public addresses.
+    """Run ``web.fetch`` ourselves, restricted to public addresses."""
 
-    Bub's handler follows redirects to any address, so a public URL could
-    bounce to cloud metadata or the private network.
-    """
-
-    args = call.arguments if isinstance(call.arguments, dict) else {}
-    url = str(args.get("url") or "")
-    headers = args.get("headers") if isinstance(args.get("headers"), dict) else None
-    timeout = args.get("timeout")
-    try:
-        text = await fetch_text(
-            url,
-            headers={str(k): str(v) for k, v in (headers or {}).items()},
-            timeout=float(timeout) if isinstance(timeout, int | float) and timeout > 0 else 30.0,
-            allow_hosts=download_allow_hosts(),
-        )
-    except BlockedAddressError as exc:
-        logger.warning("qq.security.fetch_blocked url={} reason={}", url, exc)
-        return ToolCallDecision.deny(f"web.fetch refused: {exc}")
-    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-        return ToolCallDecision.deny(f"web.fetch failed: {exc}")
-    return ToolCallDecision.replace(text)
+    ok, text = await web_fetch_for_call(call.arguments)
+    if ok:
+        return ToolCallDecision.replace(text)
+    logger.warning("qq.security.fetch_denied tool={} reason={}", call.tool, text)
+    return ToolCallDecision.deny(text)
 
 
 @hookimpl

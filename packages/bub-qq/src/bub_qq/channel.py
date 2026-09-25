@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from .approval import send_notice
 from .guard import Requester
 from .guard import evaluate
 from .guard import is_admin
+from .netguard import web_fetch_for_call
 from .inbound.interaction import parse_interaction_event
 from .outbound.c2c import QQC2CSendService
 from .outbound.group import QQGroupSendService
@@ -62,6 +64,10 @@ _MSG_TOGGLE_EVENTS: dict[str, tuple[str, str, bool]] = {
     "C2C_MSG_RECEIVE": ("c2c", "openid", True),
     "C2C_MSG_REJECT": ("c2c", "openid", False),
 }
+
+
+ERROR_NOTICE = "处理这条消息时出错了，请稍后再试。"
+_COMMAND_OUTPUT_LIMIT = 2000
 
 
 class QQChannel(Channel):
@@ -176,6 +182,16 @@ class QQChannel(Channel):
     async def send_for_result(self, message: ChannelMessage) -> dict[str, object] | None:
         """Send and return the send-service result (used by the qq.send tool)."""
 
+        if message.kind == "error":
+            # Bub reports failures as "An error occurred at stage ...: <exc>";
+            # the exception text can carry URLs, paths or keys. Log it, and
+            # tell the chat only that something went wrong.
+            logger.error(
+                "qq.outbound.error session_id={} detail={}",
+                message.session_id,
+                message.content,
+            )
+            message = replace(message, content=ERROR_NOTICE, kind="normal")
         if _is_group_target(self.name, message):
             return await self._group_send.send(message)
         return await self._c2c_send.send(message)
@@ -324,6 +340,14 @@ class QQChannel(Channel):
             )
             if reply.startswith("Not run"):
                 await send_notice(message.session_id, message.chat_id, reply)
+            return False
+        if decision.allowed and decision.resource == "fetch":
+            # Bub would run its own web.fetch (redirects to any address);
+            # answer the command with the guarded fetch instead.
+            ok, text = await web_fetch_for_call(call.arguments)
+            if len(text) > _COMMAND_OUTPUT_LIMIT:
+                text = text[:_COMMAND_OUTPUT_LIMIT] + "…"
+            await send_notice(message.session_id, message.chat_id, text)
             return False
         if decision.allowed:
             return True

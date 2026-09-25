@@ -80,7 +80,11 @@ class QQWebSocketClient:
         self._openapi = openapi
         self._on_payload = on_payload
         self._task: asyncio.Task[None] | None = None
+        # Internal stop signal. A fatal QQ error sets only this one: the
+        # gateway-wide stop event passed to start() is watched, never set,
+        # so a broken QQ login does not shut down every other channel.
         self._stop_event: asyncio.Event | None = None
+        self._external_stop: asyncio.Event | None = None
         self._shard_states: dict[int, _ShardState] = {}
         self._identify_lock: asyncio.Lock | None = None
         self._identify_attempts: deque[float] = deque()
@@ -90,7 +94,8 @@ class QQWebSocketClient:
     async def start(self, stop_event: asyncio.Event | None = None) -> None:
         if self._task is not None and not self._task.done():
             return
-        self._stop_event = stop_event or asyncio.Event()
+        self._external_stop = stop_event
+        self._stop_event = asyncio.Event()
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -115,8 +120,7 @@ class QQWebSocketClient:
             except (QQAuthError, QQOpenAPIError) as exc:
                 if _is_permanent_connect_error(exc):
                     logger.error("qq.websocket.permanent_error error={}", exc)
-                    if self._stop_event is not None:
-                        self._stop_event.set()
+                    self._give_up()
                     break
                 logger.warning("qq.websocket.error error={}", exc)
             except Exception as exc:
@@ -139,23 +143,24 @@ class QQWebSocketClient:
                     task_group.create_task(self._run_shard(spec))
         except* QQWebSocketStopRequested:
             pass
-        except* QQWebSocketFatalError:
-            if self._stop_event is not None:
-                self._stop_event.set()
-        except* QQWebSocketRetryExhausted:
-            if self._stop_event is not None:
-                self._stop_event.set()
-        except* QQAuthError:
-            if self._stop_event is not None:
-                self._stop_event.set()
-        except* QQOpenAPIError:
-            if self._stop_event is not None:
-                self._stop_event.set()
+        except* (
+            QQWebSocketFatalError,
+            QQWebSocketRetryExhausted,
+            QQAuthError,
+            QQOpenAPIError,
+        ):
+            self._give_up()
 
     async def _watch_stop_event(self) -> None:
-        if self._stop_event is None:
+        events = [e for e in (self._stop_event, self._external_stop) if e is not None]
+        if not events:
             return
-        await self._stop_event.wait()
+        waiters = [asyncio.create_task(event.wait()) for event in events]
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
         raise QQWebSocketStopRequested()
 
     async def _resolve_shard_specs(self) -> list[_ShardSpec]:
@@ -481,8 +486,22 @@ class QQWebSocketClient:
                     )
             await self._on_payload(payload)
 
+    def _give_up(self) -> None:
+        """Stop the QQ receiver after an unrecoverable error; Bub keeps running."""
+
+        logger.error(
+            "qq.websocket.stopped QQ receiving is stopped after an unrecoverable"
+            " error (see above); other channels keep running. Fix the cause and"
+            " restart the gateway."
+        )
+        if self._stop_event is not None:
+            self._stop_event.set()
+
     def _should_stop(self) -> bool:
-        return self._stop_event is not None and self._stop_event.is_set()
+        return any(
+            event is not None and event.is_set()
+            for event in (self._stop_event, self._external_stop)
+        )
 
 
 def _parse_payload(text: str) -> dict[str, Any]:

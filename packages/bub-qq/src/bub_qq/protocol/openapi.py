@@ -74,20 +74,27 @@ class QQOpenAPI:
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        request_headers = {
-            "Authorization": f"QQBot {await self.get_access_token()}",
-            "Content-Type": "application/json",
-        }
-        if headers:
-            request_headers.update(headers)
+        for attempt in range(2):
+            token = await self.get_access_token()
+            request_headers = {
+                "Authorization": f"QQBot {token}",
+                "Content-Type": "application/json",
+            }
+            if headers:
+                request_headers.update(headers)
 
-        response = await self._request(
-            method=method,
-            path=path,
-            params=params,
-            json_body=json_body,
-            headers=request_headers,
-        )
+            response = await self._request(
+                method=method,
+                path=path,
+                params=params,
+                json_body=json_body,
+                headers=request_headers,
+            )
+            if response.status != 401 or attempt:
+                break
+            # The cached token was revoked or expired early: fetch a new one
+            # and retry once instead of failing until its nominal expiry.
+            self._token_provider.invalidate(token)
         payload = response.payload
         if response.status < 200 or response.status >= 300:
             raise build_openapi_error(response, payload)

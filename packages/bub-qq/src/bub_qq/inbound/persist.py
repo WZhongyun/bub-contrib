@@ -56,12 +56,16 @@ async def _write_body(
 ) -> None:
     size = 0
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with tmp.open("wb") as handle:
-        async for chunk in response.content.iter_chunked(64 * 1024):
-            size += len(chunk)
-            if size > max_bytes:
-                handle.close()
-                tmp.unlink(missing_ok=True)
-                raise ValueError("download exceeded size cap")
-            handle.write(chunk)
-    tmp.replace(dest)
+    try:
+        with tmp.open("wb") as handle:
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError("download exceeded size cap")
+                handle.write(chunk)
+        tmp.replace(dest)
+    except BaseException:
+        # Size cap, dropped connection, timeout or cancellation: never leave
+        # a half-written .part file behind.
+        tmp.unlink(missing_ok=True)
+        raise

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+
+import pytest
 from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
@@ -8,6 +10,7 @@ from typing import Protocol
 
 from bub_qq.config import QQConfig
 from bub_qq.protocol.auth import QQTokenProvider
+from bub_qq.protocol.errors import QQOpenAPIError
 from bub_qq.protocol.errors import lookup_known_error
 from bub_qq.protocol.openapi import QQOpenAPI
 
@@ -524,3 +527,66 @@ def test_known_openapi_error_catalog_contains_reply_expired() -> None:
     assert known.name == "MSG_EXPIRE"
     assert known.category == "reply"
     assert known.retryable is False
+
+
+def test_openapi_refetches_token_once_after_401() -> None:
+    async def _run() -> None:
+        tokens = iter(["stale", "fresh", "never"])
+        seen: list[str] = []
+
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(
+                status=200, payload={"access_token": next(tokens), "expires_in": 7200}
+            )
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            seen.append(request.headers["Authorization"])
+            if request.headers["Authorization"] == "QQBot stale":
+                return FakeResponse(status=401, payload={"code": 11244})
+            return FakeResponse(status=200, payload={"ok": True})
+
+        provider = QQTokenProvider(
+            QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+            client=FakeTokenClient(token_handler),
+        )
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            provider,
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+
+        assert await openapi.post("/test") == {"ok": True}
+        assert seen == ["QQBot stale", "QQBot fresh"]
+        assert await openapi.post("/test") == {"ok": True}
+        assert seen[-1] == "QQBot fresh"  # cached again, no third token
+
+    asyncio.run(_run())
+
+
+def test_openapi_gives_up_after_second_401() -> None:
+    async def _run() -> None:
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(status=200, payload={"access_token": "t", "expires_in": 7200})
+
+        calls = {"n": 0}
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            del request
+            calls["n"] += 1
+            return FakeResponse(status=401, payload={"code": 11244})
+
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            QQTokenProvider(
+                QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+                client=FakeTokenClient(token_handler),
+            ),
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+        with pytest.raises(QQOpenAPIError):
+            await openapi.post("/test")
+        assert calls["n"] == 2
+
+    asyncio.run(_run())

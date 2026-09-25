@@ -151,3 +151,35 @@ def download_allow_hosts() -> frozenset[str]:
 
     config = bub.ensure_config(QQConfig)
     return frozenset(host.lower() for host in parse_id_list(config.download_allow_hosts or ""))
+
+
+async def web_fetch_for_call(arguments: dict[str, Any] | None) -> tuple[bool, str]:
+    """Run a ``web.fetch`` call's arguments through :func:`fetch_text`.
+
+    Returns ``(ok, text)``: the page text, or the reason it was refused or
+    failed. Bub's own handler follows redirects to any address, so both the
+    model's tool call and an admin's ``,web.fetch`` command come here.
+    """
+
+    args = arguments if isinstance(arguments, dict) else {}
+    url = str(args.get("url") or "")
+    headers = args.get("headers") if isinstance(args.get("headers"), dict) else {}
+    timeout = args.get("timeout")
+    try:
+        timeout_seconds = float(timeout) if timeout not in (None, "") else 30.0
+    except (TypeError, ValueError):
+        timeout_seconds = 30.0
+    if timeout_seconds <= 0:
+        timeout_seconds = 30.0
+    try:
+        text = await fetch_text(
+            url,
+            headers={str(k): str(v) for k, v in headers.items()},
+            timeout=timeout_seconds,
+            allow_hosts=download_allow_hosts(),
+        )
+    except BlockedAddressError as exc:
+        return False, f"web.fetch refused: {exc}"
+    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+        return False, f"web.fetch failed: {exc}"
+    return True, text

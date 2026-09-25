@@ -229,3 +229,31 @@ def test_web_fetch_follows_redirects_through_the_guard(monkeypatch, tmp_path) ->
         asyncio.run_coroutine_threadsafe(holder["server"].close(), loop).result(5)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(5)
+
+
+def test_interrupted_download_leaves_no_part_file(tmp_path: Path) -> None:
+    async def broken(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers={"Content-Length": "1000"})
+        await response.prepare(request)
+        await response.write(b"partial")
+        # Close the connection before the promised 1000 bytes arrive.
+        request.transport.close()
+        return response
+
+    app = web.Application()
+    app.router.add_get("/broken", broken)
+
+    async def _run() -> None:
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises((aiohttp.ClientError, ValueError)):
+                    await download_to_path(
+                        session, str(server.make_url("/broken")), tmp_path / "f.bin"
+                    )
+        finally:
+            await server.close()
+
+    asyncio.run(_run())
+    assert list(tmp_path.iterdir()) == []
