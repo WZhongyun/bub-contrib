@@ -22,6 +22,7 @@ from .inbound.group import QQGroupInboundService
 from .inbound.group import group_was_mentioned
 from .inbound.group import strip_mention_text
 from .inbound.interaction import ACK_INTERACTION_TYPES
+from .inbound.interaction import DEFAULT_REQUIRE_MENTION
 from .inbound.interaction import INTERACTION_QUERY
 from .inbound.interaction import INTERACTION_UPDATE
 from .inbound.interaction import build_claw_cfg
@@ -424,10 +425,8 @@ class QQChannel(Channel):
                 if group_openid
                 else None
             )
-            claw_cfg = (
-                build_claw_cfg(require_mention=require_mention)
-                if require_mention
-                else build_claw_cfg()
+            claw_cfg = build_claw_cfg(
+                require_mention=require_mention or DEFAULT_REQUIRE_MENTION
             )
             try:
                 await self._openapi.put_interaction(

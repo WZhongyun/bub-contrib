@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -48,9 +49,10 @@ async def upload_local_file(
     file_type: int,
     file_name: str | None = None,
 ) -> dict[str, Any]:
-    data = path.read_bytes()
+    # Up to 200 MB: read and hash in a worker thread, not on the event loop.
+    data = await asyncio.to_thread(path.read_bytes)
     name = file_name or path.name
-    md5, sha1, md5_10m = file_digests(data)
+    md5, sha1, md5_10m = await asyncio.to_thread(file_digests, data)
     body = {
         "file_type": file_type,
         "file_size": str(len(data)),

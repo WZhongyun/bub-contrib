@@ -20,12 +20,12 @@ from . import tools as _tools  # noqa: F401  (registers the qq.send tool)
 from .config import QQConfig
 from .security import QQ_CONTEXT_KEY
 from .security import QQ_STATE_KEY
-from .security import REPLY_TOOL_NAME
 from .security import SlidingWindowRateLimiter
 from .session import BoundedDict
 from .approval import request_approval
 from .approval import send_notice
 from .guard import Requester
+from .guard import classify
 from .guard import evaluate
 from .netguard import web_fetch_for_call
 from .store import resolve_state_path
@@ -68,12 +68,6 @@ def _qq_state(state: TurnState) -> dict[str, Any] | None:
         return None
     qq_state = state.get(QQ_STATE_KEY)
     return qq_state if isinstance(qq_state, dict) else None
-
-
-def _is_reply_tool(tool: str) -> bool:
-    """Match qq.send by either its registry name or the model-facing alias."""
-
-    return tool == REPLY_TOOL_NAME or tool.replace("_", ".") == REPLY_TOOL_NAME
 
 
 def _turn_declined_reply(qq_state: dict[str, Any], result: LlmCallResult) -> bool:
@@ -309,7 +303,7 @@ def after_tool_call(
     qq_state = _qq_state(state)
     if qq_state is None:
         return
-    if _is_reply_tool(call.tool):
+    if classify(call) == "reply":
         # Any qq.send attempt means the model did not decline this turn;
         # after_llm_call uses this to log genuine silence.
         qq_state["replied_via_tool"] = True

@@ -9,7 +9,9 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.3",
+    "bub",
     "cryptography>=45.0.0",
+    "loguru",
     "pydantic-settings>=2.10.1",
 ]
 

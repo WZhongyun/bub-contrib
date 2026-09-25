@@ -463,10 +463,9 @@ class QQWebSocketClient:
         payload: dict[str, Any],
     ) -> None:
         if payload.get("s") is not None:
-            try:
+            # A malformed sequence is ignored; the last good one is kept.
+            with contextlib.suppress(TypeError, ValueError):
                 state.sequence = int(payload["s"])
-            except (TypeError, ValueError):
-                state.sequence = state.sequence
         if payload.get("op") == 0:
             event_type = payload.get("t")
             if event_type == "READY":

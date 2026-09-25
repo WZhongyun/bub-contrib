@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import platform
 
 import pytest
 
@@ -138,7 +139,7 @@ def test_identify_uses_current_shard_index_and_total() -> None:
                     "token": "QQBot token",
                     "intents": 1 << 25,
                     "properties": {
-                        "$os": "macos",
+                        "$os": platform.system().lower() or "unknown",
                         "$browser": "bub-qq",
                         "$device": "bub-qq",
                     },

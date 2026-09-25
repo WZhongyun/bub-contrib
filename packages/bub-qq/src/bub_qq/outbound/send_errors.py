@@ -41,6 +41,50 @@ def log_send_duplicate_error(
     )
 
 
+# One place that names the send failures we recognise. Codes not listed
+# fall back to the error catalog's category (see protocol/errors.py).
+_REASON_BY_CODE: dict[int, str] = {
+    304027: "reply_expired",
+    40034005: "reply_expired",
+    40034026: "reply_expired",  # event_id expired
+    40034128: "reply_expired",  # passive reply window or count exceeded
+    304031: "dm_closed",
+    22009: "rate_limited",
+    20028: "rate_limited",
+    304045: "rate_limited",
+    304049: "rate_limited",
+    1100100: "rate_limited",
+    1100308: "rate_limited",
+    304018: "gateway_session_missing",
+    304026: "invalid_reply_message_id",
+    50048: "invalid_reply_message_id",
+    40034025: "invalid_reply_message_id",  # invalid event_id
+    304028: "reply_not_allowed",
+    50045: "reply_not_allowed",
+    50046: "reply_not_allowed",
+    50047: "reply_not_allowed",
+    40034027: "reply_not_allowed",  # event type does not support replies
+    304025: "safety_blocked",
+    1100101: "safety_blocked",
+    1100102: "safety_blocked",
+    1100103: "safety_blocked",
+}
+_REASON_BY_CATEGORY: dict[str, str] = {
+    "rate_limit": "rate_limited",
+    "safety": "safety_blocked",
+}
+
+
+def send_error_reason(exc: QQOpenAPIError) -> str | None:
+    """A short reason for a recognised send failure, else None."""
+
+    if exc.error_code is not None and exc.error_code in _REASON_BY_CODE:
+        return _REASON_BY_CODE[exc.error_code]
+    if exc.known is not None:
+        return _REASON_BY_CATEGORY.get(exc.known.category)
+    return None
+
+
 def log_send_error(
     exc: QQOpenAPIError,
     *,
@@ -50,8 +94,6 @@ def log_send_error(
     msg_seq: int,
     receive_mode: str,
 ) -> None:
-    code = exc.error_code
-    trace_id = exc.trace_id or "-"
     if is_duplicate_send_error(exc):
         log_send_duplicate_error(
             exc,
@@ -62,81 +104,23 @@ def log_send_error(
             content_hash="-",
         )
         return
-    if code in {304027, 40034005}:
-        logger.warning(
-            "qq.send failed session_id={} openid={} msg_id={} msg_seq={} reason=reply_expired trace_id={}",
-            session_id,
-            openid,
-            msg_id,
-            msg_seq,
-            trace_id,
-        )
-        return
-    if code == 304031:
-        logger.warning(
-            "qq.send failed session_id={} openid={} reason=dm_closed trace_id={}",
-            session_id,
-            openid,
-            trace_id,
-        )
-        return
-    if code in {22009, 20028, 304045, 304049, 1100100, 1100308}:
-        logger.warning(
-            "qq.send failed session_id={} openid={} msg_id={} msg_seq={} reason=rate_limited code={} retryable={} trace_id={}",
-            session_id,
-            openid,
-            msg_id,
-            msg_seq,
-            code,
-            exc.known.retryable if exc.known is not None else False,
-            trace_id,
-        )
-        return
-    if code == 304018:
-        logger.warning(
-            "qq.send failed session_id={} openid={} reason=gateway_session_missing receive_mode={} trace_id={}",
-            session_id,
-            openid,
-            receive_mode,
-            trace_id,
-        )
-        return
-    if code in {304026, 50048}:
-        logger.warning(
-            "qq.send failed session_id={} openid={} reason=invalid_reply_message_id msg_id={} msg_seq={} trace_id={}",
-            session_id,
-            openid,
-            msg_id,
-            msg_seq,
-            trace_id,
-        )
-        return
-    if code in {304028, 50045, 50046, 50047}:
-        logger.warning(
-            "qq.send failed session_id={} openid={} reason=reply_not_allowed code={} msg_id={} trace_id={}",
-            session_id,
-            openid,
-            code,
-            msg_id,
-            trace_id,
-        )
-        return
-    if code in {304025, 1100101, 1100102, 1100103}:
-        logger.warning(
-            "qq.send failed session_id={} openid={} reason=safety_blocked code={} trace_id={}",
-            session_id,
-            openid,
-            code,
-            trace_id,
-        )
-        return
-    logger.error(
-        "qq.send failed session_id={} openid={} msg_id={} msg_seq={} code={} trace_id={} error={}",
+    reason = send_error_reason(exc)
+    fields = (
+        "qq.send failed session_id={} openid={} msg_id={} msg_seq={} reason={}"
+        " code={} retryable={} receive_mode={} trace_id={}"
+    )
+    args = (
         session_id,
         openid,
         msg_id,
         msg_seq,
-        code,
-        trace_id,
-        exc,
+        reason or "unknown",
+        exc.error_code,
+        exc.known.retryable if exc.known is not None else False,
+        receive_mode,
+        exc.trace_id or "-",
     )
+    if reason is not None:
+        logger.warning(fields, *args)
+        return
+    logger.error(fields + " error={}", *args, exc)

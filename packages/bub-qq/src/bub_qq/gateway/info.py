@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,7 +51,7 @@ def identify_payload(
         "token": f"QQBot {token}",
         "intents": intents,
         "properties": {
-            "$os": "macos",
+            "$os": platform.system().lower() or "unknown",
             "$browser": "bub-qq",
             "$device": "bub-qq",
         },

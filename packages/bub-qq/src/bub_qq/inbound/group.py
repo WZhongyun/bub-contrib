@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
 from typing import Any
 
 from bub.channels.message import ChannelMessage
@@ -12,13 +11,11 @@ from ..protocol.models import QQGroupMessage
 from ..protocol.models import QQMention
 from ..guard import Requester
 from ..security import QQ_CONTEXT_KEY
-from ..security import QQAccessPolicy
-from ..session import QQInboundDeduper
-from ..session import QQSessionState
-from ..session import remember_session
 from .common import attachment_payloads
 from .common import exclude_none
+from .common import QQInboundService
 from .common import msg_element_payloads
+from .common import resolve_scoped_openid
 
 GROUP_AT_EVENT = "GROUP_AT_MESSAGE_CREATE"
 GROUP_MESSAGE_EVENT = "GROUP_MESSAGE_CREATE"
@@ -27,67 +24,40 @@ GROUP_EVENTS = {GROUP_AT_EVENT, GROUP_MESSAGE_EVENT}
 _AT_RE = re.compile(r"<@!?([^>]+)>")
 
 
-class QQGroupInboundService:
-    def __init__(
-        self,
-        *,
-        channel_name: str,
-        deduper: QQInboundDeduper,
-        state: QQSessionState,
-        policy: QQAccessPolicy,
-        suppress_direct_output: bool = False,
-        is_admin: Callable[[Requester], bool] = lambda requester: False,
-        wake_on: str = "all",
-    ) -> None:
-        self._channel_name = channel_name
-        self._deduper = deduper
-        self._state = state
-        self._policy = policy
-        self._suppress_direct_output = suppress_direct_output
-        self._is_admin = is_admin
+class QQGroupInboundService(QQInboundService[QQGroupMessage]):
+    scope = "group"
+
+    def __init__(self, *, wake_on: str = "all", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self._wake_on = wake_on
 
-    def parse_inbound(
-        self, payload: dict[str, Any]
-    ) -> tuple[QQGroupMessage, ChannelMessage] | None:
-        try:
-            message = QQGroupMessage.from_event(payload)
-        except ValueError as exc:
-            logger.warning("qq.group.invalid_payload error={}", exc)
-            return None
+    def _parse(self, payload: dict[str, Any]) -> QQGroupMessage:
+        return QQGroupMessage.from_event(payload)
 
-        if self._deduper.seen(message.message_id):
-            logger.info("qq.group.duplicate message_id={}", message.message_id)
-            return None
+    def _requester(self, message: QQGroupMessage) -> Requester:
+        return Requester(
+            scope="group",
+            sender_id=message.member_openid,
+            group_openid=message.group_openid,
+        )
 
-        if not self._policy.group_allowed(message.group_openid):
-            logger.warning(
-                "qq.group.blocked group_openid={} reason=not_in_allow_groups",
-                message.group_openid,
-            )
-            return None
+    def _allowed(self, message: QQGroupMessage, requester: Requester) -> bool:
+        if self._policy.group_allowed(message.group_openid):
+            return True
+        logger.warning(
+            "qq.group.blocked group_openid={} reason=not_in_allow_groups",
+            message.group_openid,
+        )
+        return False
 
-        channel_message = build_group_channel_message(
+    def _build(self, message: QQGroupMessage, *, allow_command: bool) -> ChannelMessage:
+        return build_group_channel_message(
             self._channel_name,
             message,
-            allow_command=self._is_admin(
-                Requester(
-                    scope="group",
-                    sender_id=message.member_openid,
-                    group_openid=message.group_openid,
-                )
-            ),
+            allow_command=allow_command,
             suppress_direct_output=self._suppress_direct_output,
             wake_on=self._wake_on,
         )
-        remember_session(
-            self._state,
-            session_id=channel_message.session_id,
-            message_id=message.message_id,
-            timestamp=message.timestamp,
-            attachments=message.attachments,
-        )
-        return message, channel_message
 
 
 def build_group_channel_message(
@@ -197,11 +167,6 @@ def strip_mention_text(text: str, mentions: tuple[QQMention, ...]) -> str:
 def resolve_group_openid(
     *, channel_name: str, session_id: str, chat_id: str
 ) -> str | None:
-    if chat_id.startswith("group:"):
-        openid = chat_id.removeprefix("group:").strip()
-        return openid or None
-    prefix = f"{channel_name}:group:"
-    if session_id.startswith(prefix):
-        openid = session_id.removeprefix(prefix).strip()
-        return openid or None
-    return None
+    return resolve_scoped_openid(
+        "group", channel_name=channel_name, session_id=session_id, chat_id=chat_id
+    )
