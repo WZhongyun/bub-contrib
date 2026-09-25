@@ -202,8 +202,11 @@ def build_outbound_context(
     media: MediaSpec | None = None,
     keyboard: dict[str, Any] | None = None,
     at_user_ids: list[str] | None = None,
+    reply_to: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
+    if reply_to:
+        payload["reply_to"] = reply_to
     if media is not None:
         payload["file_type"] = media.file_type
         if media.url:
@@ -266,6 +269,16 @@ def at_user_ids_from_message(message: ChannelMessage) -> list[str] | None:
         logger.warning("qq.send invalid_at_user_ids error={}", error)
         return None
     return ids
+
+
+def reply_to_from_message(message: ChannelMessage) -> str | None:
+    """Inbound message id the reply should target (set by ``qq.send``)."""
+
+    raw = message.context.get(OUTBOUND_CONTEXT_KEY)
+    if not isinstance(raw, dict):
+        return None
+    value = str(raw.get("reply_to") or "").strip()
+    return value or None
 
 
 def keyboard_from_message(message: ChannelMessage) -> dict[str, Any] | None:

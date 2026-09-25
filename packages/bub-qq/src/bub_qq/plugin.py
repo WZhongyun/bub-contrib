@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 import bub
@@ -21,7 +22,9 @@ from .security import QQ_CONTEXT_KEY
 from .security import QQ_STATE_KEY
 from .security import REPLY_TOOL_NAME
 from .security import SlidingWindowRateLimiter
+from .session import BoundedDict
 from .approval import request_approval
+from .approval import send_notice
 from .guard import Requester
 from .guard import evaluate
 from .netguard import web_fetch_for_call
@@ -53,6 +56,11 @@ This conversation is on the QQ channel ($qq), which overrides the generic channe
 </qq_response_instruct>"""
 
 _rate_limiter: SlidingWindowRateLimiter | None = None
+_rate_limit = 0
+# When each rate-limited sender was last told so (tool mode), to notify
+# at most once per window instead of on every blocked turn.
+_rate_notified: BoundedDict[str, float] = BoundedDict(1024)
+_RATE_VERDICT_KEY = "rate_limit_allowed"
 
 
 def _qq_state(state: TurnState) -> dict[str, Any] | None:
@@ -85,12 +93,13 @@ def _turn_declined_reply(qq_state: dict[str, Any], result: LlmCallResult) -> boo
 def _get_rate_limiter(config: QQConfig) -> SlidingWindowRateLimiter | None:
     if config.llm_rate_limit_per_minute <= 0:
         return None
-    global _rate_limiter
-    if _rate_limiter is None:
+    global _rate_limiter, _rate_limit
+    if _rate_limiter is None or _rate_limit != config.llm_rate_limit_per_minute:
         _rate_limiter = SlidingWindowRateLimiter(
             max_calls=config.llm_rate_limit_per_minute,
             window_seconds=60.0,
         )
+        _rate_limit = config.llm_rate_limit_per_minute
     return _rate_limiter
 
 
@@ -159,7 +168,7 @@ def system_prompt(prompt: Any, state: TurnState) -> str | None:
 
 
 @hookimpl
-def before_llm_call(
+async def before_llm_call(
     request: LlmCallRequest, state: TurnState
 ) -> LlmCallRequest | LlmCallDecision | None:
     del request
@@ -168,16 +177,46 @@ def before_llm_call(
         return None
     config = bub.ensure_config(QQConfig)
     limiter = _get_rate_limiter(config)
-    if limiter is not None:
-        key = f"{qq_state.get('session_id')}|{qq_state.get('sender_id')}"
-        if not limiter.allow(key):
-            logger.warning(
-                "qq.security.llm_rate_limited session_id={} sender_id={}",
-                qq_state.get("session_id"),
-                qq_state.get("sender_id"),
-            )
-            return LlmCallDecision.finish(config.llm_rate_limit_notice)
-    return None
+    if limiter is None:
+        return None
+    key = f"{qq_state.get('session_id')}|{qq_state.get('sender_id')}"
+    # Count each turn once: a turn makes one LLM call per tool step, and
+    # cutting it off midway would leave a half-done answer.
+    allowed = qq_state.get(_RATE_VERDICT_KEY)
+    if allowed is None:
+        allowed = limiter.allow(key)
+        qq_state[_RATE_VERDICT_KEY] = allowed
+    if allowed:
+        return None
+    logger.warning(
+        "qq.security.llm_rate_limited session_id={} sender_id={}",
+        qq_state.get("session_id"),
+        qq_state.get("sender_id"),
+    )
+    if config.reply_mode == "tool":
+        # Tool mode drops direct output, so the finish text below would
+        # never reach the chat; send the notice ourselves.
+        await _notify_rate_limited(qq_state, config, key)
+    return LlmCallDecision.finish(config.llm_rate_limit_notice)
+
+
+async def _notify_rate_limited(
+    qq_state: dict[str, Any], config: QQConfig, key: str
+) -> None:
+    now = time.monotonic()
+    last = _rate_notified.get(key)
+    if last is not None and now - last < 60.0:
+        return
+    _rate_notified[key] = now
+    session_id = str(qq_state.get("session_id") or "")
+    if str(qq_state.get("scope") or "") == "group":
+        chat_id = f"group:{qq_state.get('group_openid') or ''}"
+    else:
+        chat_id = f"c2c:{qq_state.get('sender_id') or ''}"
+    try:
+        await send_notice(session_id, chat_id, config.llm_rate_limit_notice)
+    except Exception as exc:
+        logger.warning("qq.security.rate_notice_failed error={}", exc)
 
 
 @hookimpl

@@ -397,7 +397,7 @@ class QQOpenAPI:
                 {
                     "msg_type": 7,
                     "media": {"file_info": file_info},
-                    "msg_id": msg_id,
+                    **reply_fields(msg_id),
                     "msg_seq": msg_seq,
                 },
                 keyboard,
@@ -419,7 +419,7 @@ class QQOpenAPI:
                 {
                     "content": content,
                     "msg_type": 0,
-                    "msg_id": msg_id,
+                    **reply_fields(msg_id),
                     "msg_seq": msg_seq,
                 },
                 keyboard,
@@ -441,7 +441,7 @@ class QQOpenAPI:
                 {
                     "msg_type": 2,
                     "markdown": {"content": content},
-                    "msg_id": msg_id,
+                    **reply_fields(msg_id),
                     "msg_seq": msg_seq,
                 },
                 keyboard,
@@ -471,6 +471,27 @@ def _with_keyboard(
     if keyboard:
         body["keyboard"] = keyboard
     return body
+
+
+EVENT_REPLY_PREFIX = "event:"
+
+
+def event_reply_id(event_id: str) -> str:
+    """Reply id for an event (e.g. a button click) rather than a message."""
+
+    return f"{EVENT_REPLY_PREFIX}{event_id}"
+
+
+def reply_fields(reply_id: str) -> dict[str, str]:
+    """``msg_id`` for messages, ``event_id`` for events.
+
+    QQ answers button clicks (INTERACTION_CREATE) through ``event_id``; a
+    click id passed as ``msg_id`` is rejected as an invalid message id.
+    """
+
+    if reply_id.startswith(EVENT_REPLY_PREFIX):
+        return {"event_id": reply_id.removeprefix(EVENT_REPLY_PREFIX)}
+    return {"msg_id": reply_id}
 
 
 class _QQResponse:

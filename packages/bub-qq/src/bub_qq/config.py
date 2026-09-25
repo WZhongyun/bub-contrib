@@ -4,10 +4,13 @@ from typing import Literal
 
 import bub
 from pydantic import Field
+from pydantic import field_validator
 from pydantic_settings import SettingsConfigDict
 
 type ToolPolicy = Literal["open", "restricted", "locked"]
 type ReplyMode = Literal["direct", "tool"]
+type ReceiveMode = Literal["webhook", "websocket"]
+type GroupWake = Literal["all", "mention"]
 type GroupShell = Literal["deny", "approval"]
 type ShellSandbox = Literal["none", "external"]
 type C2CAccess = Literal["admin_users", "allow_users"]
@@ -29,14 +32,13 @@ class QQConfig(bub.Settings):
     openapi_base_url: str = "https://api.bot.qq.com"
     timeout_seconds: float = 30.0
     token_refresh_skew_seconds: int = 60
-    receive_mode: str = Field(
+    receive_mode: ReceiveMode | Literal[""] = Field(
         default="",
         description="QQ inbound transport mode. Must be set to 'webhook' or 'websocket' before gateway start.",
     )
     webhook_host: str = "127.0.0.1"
     webhook_port: int = 8080
     webhook_path: str = "/qq/webhook"
-    webhook_callback_timeout_seconds: float = 15.0
     verify_signature: bool = True
     webhook_signature_timestamp_tolerance_seconds: float = Field(
         default=300.0,
@@ -52,10 +54,14 @@ class QQConfig(bub.Settings):
         ge=1,
         description="Max sessions/send records kept in memory for passive replies.",
     )
-    passive_reply_window_seconds: float = Field(
-        default=3600.0,
+    passive_reply_window_seconds: float | None = Field(
+        default=None,
         gt=0,
-        description="How long after an inbound message passive replies are attempted.",
+        description=(
+            "Override how long after an inbound message passive replies are"
+            " attempted. Unset uses the platform limits: 3600 s in C2C,"
+            " 300 s in groups."
+        ),
     )
     active_messages: bool = Field(
         default=False,
@@ -74,13 +80,14 @@ class QQConfig(bub.Settings):
             " the reply (output exactly <no_reply/> to stay silent)."
         ),
     )
-    passive_replies_per_msg_id: int = Field(
-        default=4,
+    passive_replies_per_msg_id: int | None = Field(
+        default=None,
         ge=1,
         description=(
-            "Local cap of passive replies per inbound msg_id, aligned with"
-            " the platform limit; beyond it the send falls back to an active"
-            " message (when enabled) or is skipped."
+            "Override the local cap of passive replies per inbound msg_id;"
+            " beyond it the send falls back to an active message (when"
+            " enabled) or is skipped. Unset uses the platform limits: 4 in"
+            " C2C, 5 in groups."
         ),
     )
     state_file: str = Field(
@@ -119,6 +126,15 @@ class QQConfig(bub.Settings):
         description=(
             "Comma-separated group openid allowlist. When set, messages from"
             " other groups are dropped. Empty allows every group."
+        ),
+    )
+    group_wake: GroupWake = Field(
+        default="all",
+        description=(
+            "Which group messages start a model turn: 'all' (every message"
+            " QQ delivers; the model decides whether to reply) or 'mention'"
+            " (only @-mentions; follow-ups right after are still included)."
+            " Saves model calls in busy groups."
         ),
     )
     group_shell: GroupShell = Field(
@@ -197,3 +213,9 @@ class QQConfig(bub.Settings):
         default="请求过于频繁，请稍后再试。",
         description="Reply text used when a sender hits the LLM rate limit.",
     )
+
+    @field_validator("receive_mode", mode="before")
+    @classmethod
+    def _normalize_receive_mode(cls, value: object) -> object:
+        # Accept "WebSocket", " webhook " etc. as before the Literal type.
+        return value.strip().lower() if isinstance(value, str) else value

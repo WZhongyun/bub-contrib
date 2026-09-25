@@ -115,7 +115,13 @@ async def qq_send(
             channel=channel.name,
             chat_id=chat_id,
             content=content,
-            context=build_outbound_context(media=media, at_user_ids=mentions),
+            context=build_outbound_context(
+                media=media,
+                at_user_ids=mentions,
+                # Reply to the message that triggered this turn, not to
+                # whatever arrived in the chat since.
+                reply_to=str(qq_state.get("message_id") or "") or None,
+            ),
         )
     )
     return format_send_result(result)

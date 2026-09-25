@@ -219,7 +219,7 @@ def test_channel_acks_button_then_receives(tmp_path) -> None:
         assert payload["button_id"] == "allow-once"
         assert (
             channel._session_state.latest_message_id_by_session["qq:c2c:user-openid"]
-            == "interaction-btn"
+            == "event:interaction-btn"
         )
 
     asyncio.run(_run())

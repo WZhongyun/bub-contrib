@@ -6,6 +6,7 @@ from typing import Any
 from bub.channels.message import ChannelMessage
 from loguru import logger
 
+from ..protocol.openapi import event_reply_id
 from ..security import QQ_CONTEXT_KEY
 from .common import exclude_none
 
@@ -105,7 +106,8 @@ def build_interaction_channel_message(
                 "scope": scope,
                 "sender_id": sender_id or None,
                 "group_openid": group_openid or None,
-                "message_id": event["id"],
+                # A click is answered through event_id, not msg_id.
+                "message_id": event_reply_id(event["id"]),
             }
         )
     }

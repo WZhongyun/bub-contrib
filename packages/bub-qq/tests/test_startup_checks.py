@@ -66,3 +66,15 @@ def test_unclaimed_bot_logs_a_pairing_code(make_channel, logs) -> None:
     assert code is not None
     assert any(f",qq.claim {code}" in line for line in logs)
     assert make_channel(admin_users="c2c:u1")._admins.bootstrap_code() is None
+
+
+def test_send_services_get_platform_limits_per_scope(make_channel) -> None:
+    channel = make_channel()
+    assert channel._c2c_send._passive_reply_window_seconds == 3600
+    assert channel._c2c_send._passive_replies_per_msg_id == 4
+    assert channel._group_send._passive_reply_window_seconds == 300
+    assert channel._group_send._passive_replies_per_msg_id == 5
+
+    tuned = make_channel(passive_reply_window_seconds=120, passive_replies_per_msg_id=2)
+    assert tuned._group_send._passive_reply_window_seconds == 120
+    assert tuned._c2c_send._passive_replies_per_msg_id == 2

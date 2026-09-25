@@ -37,6 +37,7 @@ class QQGroupInboundService:
         policy: QQAccessPolicy,
         suppress_direct_output: bool = False,
         is_admin: Callable[[Requester], bool] = lambda requester: False,
+        wake_on: str = "all",
     ) -> None:
         self._channel_name = channel_name
         self._deduper = deduper
@@ -44,6 +45,7 @@ class QQGroupInboundService:
         self._policy = policy
         self._suppress_direct_output = suppress_direct_output
         self._is_admin = is_admin
+        self._wake_on = wake_on
 
     def parse_inbound(
         self, payload: dict[str, Any]
@@ -76,6 +78,7 @@ class QQGroupInboundService:
                 )
             ),
             suppress_direct_output=self._suppress_direct_output,
+            wake_on=self._wake_on,
         )
         remember_session(
             self._state,
@@ -93,6 +96,7 @@ def build_group_channel_message(
     *,
     allow_command: bool = False,
     suppress_direct_output: bool = False,
+    wake_on: str = "all",
 ) -> ChannelMessage:
     session_id = f"{channel_name}:group:{message.group_openid}"
     chat_id = f"group:{message.group_openid}"
@@ -151,7 +155,9 @@ def build_group_channel_message(
         content=json.dumps(exclude_none(payload), ensure_ascii=False),
         channel=channel_name,
         chat_id=chat_id,
-        is_active=True,
+        # wake_on="mention": only @-mentions start a turn; Bub still hands
+        # the model the follow-up messages that arrive while it is active.
+        is_active=was_mentioned if wake_on == "mention" else True,
         context=context,
         # In tool reply mode the model replies via the qq.send tool; route
         # the direct model output to the "null" channel so it is dropped.

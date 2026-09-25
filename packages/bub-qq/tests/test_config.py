@@ -47,3 +47,20 @@ def test_reply_mode_rejects_unknown_values() -> None:
         assert "reply_mode" in str(exc)
     else:
         raise AssertionError("expected reply_mode='skill' to be rejected")
+
+
+def test_receive_mode_is_normalized_and_validated() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    assert QQConfig(receive_mode=" WebSocket ").receive_mode == "websocket"
+    assert QQConfig().receive_mode == ""
+    with pytest.raises(ValidationError):
+        QQConfig(receive_mode="http")
+
+
+def test_passive_limits_default_to_platform_values() -> None:
+    config = QQConfig()
+    assert config.passive_reply_window_seconds is None
+    assert config.passive_replies_per_msg_id is None
+    assert config.group_wake == "all"

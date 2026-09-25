@@ -17,6 +17,7 @@ from .media import keyboard_from_message
 from .media import materialize_media_file
 from .media import media_from_message
 from .media import outbound_dedupe_content
+from .media import reply_to_from_message
 from .upload import upload_local_file
 from .send_flow import DEFAULT_PASSIVE_REPLIES_PER_MSG_ID
 from .send_flow import DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS
@@ -178,4 +179,5 @@ class QQC2CSendService:
             send_media=send_media,
             force_markdown=keyboard is not None or bool(at_user_ids),
             dedupe_content=outbound_dedupe_content(content, media, keyboard),
+            reply_to=reply_to_from_message(message),
         )

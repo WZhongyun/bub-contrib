@@ -18,9 +18,10 @@ from .media import keyboard_from_message
 from .media import materialize_media_file
 from .media import media_from_message
 from .media import outbound_dedupe_content
+from .media import reply_to_from_message
 from .upload import upload_local_file
-from .send_flow import DEFAULT_PASSIVE_REPLIES_PER_MSG_ID
-from .send_flow import DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS
+from .send_flow import GROUP_PASSIVE_REPLIES_PER_MSG_ID
+from .send_flow import GROUP_PASSIVE_REPLY_WINDOW_SECONDS
 from .send_flow import ActiveSender
 from .send_flow import is_no_reply
 from .send_flow import normalize_outbound_content
@@ -80,8 +81,8 @@ class QQGroupSendService:
         receive_mode: str,
         state: QQSessionState,
         openapi: QQGroupOpenAPI,
-        passive_reply_window_seconds: float = DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS,
-        passive_replies_per_msg_id: int = DEFAULT_PASSIVE_REPLIES_PER_MSG_ID,
+        passive_reply_window_seconds: float = GROUP_PASSIVE_REPLY_WINDOW_SECONDS,
+        passive_replies_per_msg_id: int = GROUP_PASSIVE_REPLIES_PER_MSG_ID,
         active_messages: bool = False,
         platform_store: QQPlatformStore | None = None,
         workspace: Path | None = None,
@@ -210,4 +211,5 @@ class QQGroupSendService:
             send_media=send_media,
             force_markdown=keyboard is not None or bool(at_user_ids),
             dedupe_content=outbound_dedupe_content(content, media, keyboard),
+            reply_to=reply_to_from_message(message),
         )

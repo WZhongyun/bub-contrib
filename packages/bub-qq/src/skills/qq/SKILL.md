@@ -27,7 +27,7 @@ Use this skill when the current conversation is on QQ.
 
 - Session is per group (`qq:group:<group_openid>`), not per sender.
 - Inbound JSON includes `chat_type=group`, `group_openid`, `sender_id` (member openid), `sender_name`, and `was_mentioned`.
-- You are woken for every group message QQ delivers. A group admin controls that scope in the QQ client (all messages, last 10 @mentions, or @only).
+- You are woken for every group message QQ delivers (or only for @-mentions and their follow-ups when the deployer sets `group_wake: mention`). A group admin controls which messages QQ delivers in the QQ client (all messages, last 10 @mentions, or @only).
 - When `was_mentioned` is false, reply only if you have something useful to add; otherwise stay silent.
 - Prefer human messages over other bots. Do not compete or spam the group.
 - To @ a member with the native QQ mention chip, call `qq.send` with `at_user_ids` set to their `sender_id`. Do not write `@nickname` as plain text.

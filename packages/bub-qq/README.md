@@ -145,14 +145,14 @@ Gateway start fails if `appid` / `secret` are empty, or if `receive_mode` is not
 | `webhook_host` | `BUB_QQ_WEBHOOK_HOST` | `127.0.0.1` | Embedded webhook bind host |
 | `webhook_port` | `BUB_QQ_WEBHOOK_PORT` | `8080` | Embedded webhook port (`80` / `443` / `8080` / `8443` allowed by QQ) |
 | `webhook_path` | `BUB_QQ_WEBHOOK_PATH` | `/qq/webhook` | Webhook path |
-| `webhook_callback_timeout_seconds` | `BUB_QQ_WEBHOOK_CALLBACK_TIMEOUT_SECONDS` | `15` | Reserved for future callback controls |
 | `verify_signature` | `BUB_QQ_VERIFY_SIGNATURE` | `true` | Enforce webhook signature verification |
 | `webhook_signature_timestamp_tolerance_seconds` | `BUB_QQ_WEBHOOK_SIGNATURE_TIMESTAMP_TOLERANCE_SECONDS` | `300` | Reject webhook requests whose signature timestamp deviates from local time by more than this many seconds (blocks replayed callbacks; keep the server clock in sync); `0` disables the check. Webhook bodies over 1 MB are rejected |
 | `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | Recent inbound `msg_id` cache size |
 | `session_state_size` | `BUB_QQ_SESSION_STATE_SIZE` | `1024` | Max sessions / send records kept in memory for passive replies (oldest entries are evicted) |
-| `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | How long after an inbound message passive replies are attempted |
+| `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | platform limit | Override how long after an inbound message passive replies are attempted; unset uses the platform limits (3600 s in C2C, 300 s in groups) |
 | `active_messages` | `BUB_QQ_ACTIVE_MESSAGES` | `false` | Send proactive group messages (no `msg_id`) when a passive reply is impossible; requires the group admin to allow proactive messages in the QQ client |
-| `passive_replies_per_msg_id` | `BUB_QQ_PASSIVE_REPLIES_PER_MSG_ID` | `4` | Local cap of passive replies per inbound `msg_id`; beyond it the send falls back to an active message (when enabled) or is skipped |
+| `passive_replies_per_msg_id` | `BUB_QQ_PASSIVE_REPLIES_PER_MSG_ID` | platform limit | Override the local cap of passive replies per inbound message; unset uses the platform limits (4 in C2C, 5 in groups). Beyond it the send falls back to an active message (when enabled) or is skipped |
+| `group_wake` | `BUB_QQ_GROUP_WAKE` | `all` | Which group messages start a model turn: `all` (the model decides whether to reply) or `mention` (only @-mentions; follow-ups right after are still included). `mention` saves model calls in busy groups |
 | `reply_mode` | `BUB_QQ_REPLY_MODE` | `tool` | How model output reaches QQ: `tool` (default) disables direct forwarding and exposes the `qq.send` tool; `direct` forwards the final text (output exactly `<no_reply/>` to stay silent) (see Reply modes) |
 | `state_file` | `BUB_QQ_STATE_FILE` | empty | JSON file persisting registered admins and platform switches (active-message opt-ins, group claw_cfg); empty uses `<bub home>/qq/state.json` |
 | `admin_users` | `BUB_QQ_ADMIN_USERS` | empty | Admins, the only trusted senders. Entries are scoped identities (`c2c:<user_openid>`, `group:<group_openid>:<member_openid>`) or bare openids matching in any scope. Usually left empty and filled by `,qq.claim` (see Security) |
@@ -190,7 +190,7 @@ export BUB_QQ_RECEIVE_MODE=websocket
 
 Removed in 0.3.0: `exec_approval` (use `group_shell`) and `workspace_jail` (replaced by the Guard; see Security). If still set they are ignored with a startup warning.
 
-Which group messages the bot hears is controlled in the QQ client by a group admin setting (all messages / last 10 @mentions / @only). Every received group message wakes the model; `was_mentioned` in the payload is `false` when the bot was not @mentioned.
+Which group messages the bot hears is controlled in the QQ client by a group admin setting (all messages / last 10 @mentions / @only). With `group_wake: all` (default) every received group message wakes the model, and `was_mentioned` in the payload is `false` when the bot was not @mentioned; with `group_wake: mention` only @-mentions start a turn.
 
 Settings path in the latest mobile QQ client: **open the group chat → tap "More" in the top-right corner → Group Bots → Manage**. There the group owner or an admin can adjust the bot's group message scope and toggle "allow the bot to speak proactively" (pairs with `active_messages`).
 
@@ -211,7 +211,8 @@ The model's final text is forwarded to the chat as-is — delivery never depends
 Notes for `tool` mode:
 
 - Comma-command output is always delivered directly in both modes (commands bypass the model).
-- The `llm_rate_limit_notice` text is not delivered in tool mode (the short-circuited turn produces direct output, which tool mode drops); the rate limit itself still applies and is logged.
+- When a sender hits `llm_rate_limit_per_minute`, the plugin sends `llm_rate_limit_notice` itself (at most once per minute per sender). The limit counts turns, not the individual LLM calls of a multi-step turn.
+- `qq.send` replies to the message that triggered the turn, even if newer messages arrived meanwhile; button clicks are answered through `event_id` as QQ requires.
 
 ## Security
 

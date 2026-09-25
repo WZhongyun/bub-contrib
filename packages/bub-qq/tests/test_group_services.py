@@ -491,3 +491,54 @@ def test_interaction_query_payload_and_claw_cfg() -> None:
     assert event["id"] == "interaction-1"
     assert event["type"] == 2001
     assert build_claw_cfg()["require_mention"] == "always"
+
+
+def test_group_wake_mention_only_activates_on_mentions() -> None:
+    def service(wake_on: str) -> QQGroupInboundService:
+        return QQGroupInboundService(
+            channel_name="qq",
+            deduper=QQInboundDeduper(16),
+            state=_state(),
+            policy=QQAccessPolicy(),
+            wake_on=wake_on,
+        )
+
+    chatter = _payload(event_type="GROUP_MESSAGE_CREATE", content="lunch?", mentions=[])
+    mention = _payload(message_id="m2", content="<@bot-openid> hi")
+
+    assert service("all").parse_inbound(chatter)[1].is_active is True
+    assert service("mention").parse_inbound(chatter)[1].is_active is False
+    assert service("mention").parse_inbound(mention)[1].is_active is True
+
+
+def test_group_send_replies_to_the_triggering_message() -> None:
+    from bub_qq.outbound.media import build_outbound_context
+    from bub_qq.session import remember_session
+
+    async def _run() -> None:
+        state = _state()
+        for message_id in ("trigger", "newer"):
+            remember_session(
+                state,
+                session_id="qq:group:group-openid",
+                message_id=message_id,
+                timestamp="2099-01-01T00:00:00+00:00",
+            )
+        openapi = GroupOpenAPIStub()
+        service = QQGroupSendService(
+            channel_name="qq", receive_mode="websocket", state=state, openapi=openapi
+        )
+
+        await service.send(
+            ChannelMessage(
+                session_id="qq:group:group-openid",
+                chat_id="group:group-openid",
+                content="answer",
+                channel="qq",
+                context=build_outbound_context(reply_to="trigger"),
+            )
+        )
+
+        assert openapi.calls[0]["msg_id"] == "trigger"
+
+    asyncio.run(_run())

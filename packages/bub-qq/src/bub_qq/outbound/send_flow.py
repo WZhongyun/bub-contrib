@@ -38,8 +38,15 @@ from .send_errors import is_pending_audit_error
 from .send_errors import log_send_duplicate_error
 from .send_errors import log_send_error
 
-DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS = 3600.0
-DEFAULT_PASSIVE_REPLIES_PER_MSG_ID = 4
+# Platform limits for passive replies (QQ OpenAPI docs): C2C messages can
+# be answered for 60 minutes, at most 4 times; group messages for 5
+# minutes, at most 5 times.
+C2C_PASSIVE_REPLY_WINDOW_SECONDS = 3600.0
+C2C_PASSIVE_REPLIES_PER_MSG_ID = 4
+GROUP_PASSIVE_REPLY_WINDOW_SECONDS = 300.0
+GROUP_PASSIVE_REPLIES_PER_MSG_ID = 5
+DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS = C2C_PASSIVE_REPLY_WINDOW_SECONDS
+DEFAULT_PASSIVE_REPLIES_PER_MSG_ID = C2C_PASSIVE_REPLIES_PER_MSG_ID
 
 # Pseudo msg_id used to key dedupe records for active (proactive) sends.
 ACTIVE_MSG_ID = "__active__"
@@ -94,8 +101,9 @@ async def run_send_flow(
     send_media: MediaSender | None = None,
     force_markdown: bool = False,
     dedupe_content: str | None = None,
+    reply_to: str | None = None,
 ) -> dict[str, object] | None:
-    msg_id = state.latest_message_id_by_session.get(session_id)
+    msg_id = reply_target(state, session_id, reply_to)
     passive_blocked_reason = _passive_blocked_reason(
         state,
         session_id=session_id,
@@ -330,7 +338,7 @@ def _passive_blocked_reason(
     if not msg_id:
         return "missing_msg_id"
     if not is_passive_reply_window_open(
-        state, session_id, window_seconds=window_seconds
+        state, session_id, window_seconds=window_seconds, msg_id=msg_id
     ):
         return "passive_reply_window_expired"
     used = state.latest_sequence_by_session_and_msg_id.get((session_id, msg_id), 0)
@@ -416,16 +424,38 @@ def normalize_outbound_content(content: str) -> str:
     return _strip_edge_special_tokens(normalized)
 
 
+def reply_target(
+    state: QQSessionState, session_id: str, reply_to: str | None
+) -> str | None:
+    """The message to reply to: ``reply_to`` when it belongs to this chat.
+
+    ``reply_to`` is the message that triggered the turn (known in tool
+    mode). Without it — direct mode, approval notices — the latest message
+    of the chat is used.
+    """
+
+    if reply_to:
+        known = state.message_by_id.get(reply_to)
+        if known is not None and known[0] == session_id:
+            return reply_to
+    return state.latest_message_id_by_session.get(session_id)
+
+
 def is_passive_reply_window_open(
     state: QQSessionState,
     session_id: str,
     *,
     window_seconds: float = DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS,
+    msg_id: str | None = None,
 ) -> bool:
     # Fail open on a missing or unparsable timestamp: blocking the reply
     # locally would be worse than letting QQ reject an expired one, and QQ
     # events are not guaranteed to carry a timestamp.
-    timestamp = state.latest_timestamp_by_session.get(session_id)
+    known = state.message_by_id.get(msg_id) if msg_id else None
+    if known is not None and known[0] == session_id:
+        timestamp = known[1]
+    else:
+        timestamp = state.latest_timestamp_by_session.get(session_id)
     if not timestamp:
         return True
     try:

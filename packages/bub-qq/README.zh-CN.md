@@ -145,14 +145,14 @@ QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 
 | `webhook_host` | `BUB_QQ_WEBHOOK_HOST` | `127.0.0.1` | 内嵌 webhook 监听地址 |
 | `webhook_port` | `BUB_QQ_WEBHOOK_PORT` | `8080` | 内嵌 webhook 端口（QQ 允许 `80` / `443` / `8080` / `8443`） |
 | `webhook_path` | `BUB_QQ_WEBHOOK_PATH` | `/qq/webhook` | webhook 路径 |
-| `webhook_callback_timeout_seconds` | `BUB_QQ_WEBHOOK_CALLBACK_TIMEOUT_SECONDS` | `15` | 预留给后续回调控制 |
 | `verify_signature` | `BUB_QQ_VERIFY_SIGNATURE` | `true` | 是否校验 webhook 签名 |
 | `webhook_signature_timestamp_tolerance_seconds` | `BUB_QQ_WEBHOOK_SIGNATURE_TIMESTAMP_TOLERANCE_SECONDS` | `300` | webhook 签名时间戳与本地时间的最大允许偏差（秒），用于拦截重放的回调，请保持服务器时间同步；`0` 表示不校验。超过 1 MB 的 webhook 请求体会被拒绝 |
 | `inbound_dedupe_size` | `BUB_QQ_INBOUND_DEDUPE_SIZE` | `1024` | 近期入站 `msg_id` 去重缓存大小 |
 | `session_state_size` | `BUB_QQ_SESSION_STATE_SIZE` | `1024` | 被动回复会话状态与发送记录的内存条数上限（超出后淘汰最旧条目） |
-| `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | `3600` | 入站消息之后尝试被动回复的时间窗口（秒） |
+| `passive_reply_window_seconds` | `BUB_QQ_PASSIVE_REPLY_WINDOW_SECONDS` | 平台限制 | 覆盖入站消息之后尝试被动回复的时间窗口（秒）；不设置时按平台限制：私聊 3600 秒、群聊 300 秒 |
 | `active_messages` | `BUB_QQ_ACTIVE_MESSAGES` | `false` | 无法被动回复时改发群主动消息（不带 `msg_id`）；需要群管理员在 QQ 客户端允许机器人主动发言 |
-| `passive_replies_per_msg_id` | `BUB_QQ_PASSIVE_REPLIES_PER_MSG_ID` | `4` | 每条入站 `msg_id` 的被动回复本地上限；超出后降级为主动消息（若已开启）或跳过 |
+| `passive_replies_per_msg_id` | `BUB_QQ_PASSIVE_REPLIES_PER_MSG_ID` | 平台限制 | 覆盖每条入站消息的被动回复次数上限；不设置时按平台限制：私聊 4 次、群聊 5 次。超出后降级为主动消息（若已开启）或跳过 |
+| `group_wake` | `BUB_QQ_GROUP_WAKE` | `all` | 哪些群消息会唤醒模型：`all`（每条都唤醒，由模型决定是否回复）或 `mention`（只有 @ 机器人时唤醒，紧随其后的消息仍会带上）。群消息多时用 `mention` 可节省模型调用 |
 | `reply_mode` | `BUB_QQ_REPLY_MODE` | `tool` | 模型输出如何到达 QQ：`tool`（默认）关闭直通转发并注册 `qq.send` 工具；`direct` 直通转发最终文本（输出 `<no_reply/>` 表示沉默）（见「回复模式」） |
 | `state_file` | `BUB_QQ_STATE_FILE` | 空 | 持久化已登记管理员与平台开关状态（主动消息授权、群 claw_cfg）的 JSON 文件；留空使用 `<bub home>/qq/state.json` |
 | `admin_users` | `BUB_QQ_ADMIN_USERS` | 空 | 管理员，唯一受信任的发送者。条目是带场景的身份（`c2c:<user_openid>`、`group:<group_openid>:<member_openid>`），或在任意场景都匹配的裸 openid。通常留空，用 `,qq.claim` 登记（见「安全」） |
@@ -190,7 +190,7 @@ export BUB_QQ_RECEIVE_MODE=websocket
 
 0.3.0 移除了 `exec_approval`（改用 `group_shell`）和 `workspace_jail`（由 Guard 取代，见「安全」）。如果仍然设置，启动时会打印警告并忽略。
 
-群聊能听到哪些消息，由 QQ 客户端里群管理员的「允许机器人可获取的群聊消息范围」决定（全部消息 / @ 最近 10 条 / 仅 @）。插件对收到的每条群消息都会唤醒模型；未 @ 时 payload 里 `was_mentioned` 为 `false`，模型可按当前回复模式选择不回复。
+群聊能听到哪些消息，由 QQ 客户端里群管理员的「允许机器人可获取的群聊消息范围」决定（全部消息 / @ 最近 10 条 / 仅 @）。`group_wake: all`（默认）时插件对收到的每条群消息都会唤醒模型，未 @ 时 payload 里 `was_mentioned` 为 `false`，模型可按当前回复模式选择不回复；`group_wake: mention` 时只有 @ 机器人才会唤醒。
 
 最新版手机 QQ 中的设置路径：**进入群聊 → 右上角「更多」 → 群机器人 → 管理**。群主或管理员可在此调整「机器人可获取的群聊消息范围」，以及是否「允许机器人主动发言」（配合 `active_messages` 使用）。
 
@@ -211,7 +211,8 @@ export BUB_QQ_RECEIVE_MODE=websocket
 `tool` 模式注意事项：
 
 - 逗号命令的输出在两种模式下都直接送达（命令不经过模型）。
-- `llm_rate_limit_notice` 提示文本在 tool 模式下不会送达（被短路的回合产生的是直通输出，tool 模式会丢弃它）；频控本身仍然生效并记录日志。
+- 发送者触发 `llm_rate_limit_per_minute` 时，插件会自己发送 `llm_rate_limit_notice`（每个发送者每分钟最多一次）。频控按回合计数，多步工具调用的一个回合只算一次。
+- `qq.send` 回复的是触发本回合的那条消息，即使期间又有新消息进来；按钮点击按 QQ 的要求通过 `event_id` 回复。
 
 ## 安全
 

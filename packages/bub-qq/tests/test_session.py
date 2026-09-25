@@ -91,6 +91,33 @@ def test_remember_session_updates_message_id_and_timestamp() -> None:
     )
 
     assert state.latest_message_id_by_session["qq:c2c:user"] == "message-2"
-    assert (
-        state.latest_timestamp_by_session["qq:c2c:user"] == "2099-01-01T00:00:00+00:00"
+    # message-2 has no timestamp of its own; it must not inherit message-1's.
+    assert state.latest_timestamp_by_session["qq:c2c:user"] == ""
+    assert state.message_by_id["message-1"] == (
+        "qq:c2c:user",
+        "2099-01-01T00:00:00+00:00",
     )
+    assert state.message_by_id["message-2"] == ("qq:c2c:user", "")
+
+
+def test_reply_target_prefers_triggering_message_of_same_chat() -> None:
+    from bub_qq.outbound.send_flow import is_passive_reply_window_open
+    from bub_qq.outbound.send_flow import reply_target
+
+    state = QQSessionState()
+    remember_session(
+        state, session_id="qq:group:g", message_id="a", timestamp="2000-01-01T00:00:00+00:00"
+    )
+    remember_session(
+        state, session_id="qq:group:g", message_id="b", timestamp="2099-01-01T00:00:00+00:00"
+    )
+    remember_session(state, session_id="qq:group:other", message_id="x", timestamp=None)
+
+    assert reply_target(state, "qq:group:g", "a") == "a"
+    assert reply_target(state, "qq:group:g", None) == "b"
+    # Unknown or foreign ids fall back to the chat's latest message.
+    assert reply_target(state, "qq:group:g", "x") == "b"
+    assert reply_target(state, "qq:group:g", "missing") == "b"
+    # The window is judged by the targeted message's own timestamp.
+    assert not is_passive_reply_window_open(state, "qq:group:g", window_seconds=300, msg_id="a")
+    assert is_passive_reply_window_open(state, "qq:group:g", window_seconds=300, msg_id="b")

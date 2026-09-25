@@ -43,9 +43,14 @@ from .netguard import web_fetch_for_call
 from .inbound.interaction import parse_interaction_event
 from .outbound.c2c import QQC2CSendService
 from .outbound.group import QQGroupSendService
+from .outbound.send_flow import C2C_PASSIVE_REPLIES_PER_MSG_ID
+from .outbound.send_flow import C2C_PASSIVE_REPLY_WINDOW_SECONDS
+from .outbound.send_flow import GROUP_PASSIVE_REPLIES_PER_MSG_ID
+from .outbound.send_flow import GROUP_PASSIVE_REPLY_WINDOW_SECONDS
 from .protocol.auth import QQTokenProvider
 from .protocol.errors import QQOpenAPIError
 from .protocol.openapi import QQOpenAPI
+from .protocol.openapi import event_reply_id
 from .runtime import set_active_channel
 from .security import QQ_CONTEXT_KEY
 from .security import QQAccessPolicy
@@ -110,14 +115,20 @@ class QQChannel(Channel):
             policy=self._policy,
             suppress_direct_output=suppress_direct_output,
             is_admin=self._is_admin,
+            wake_on=self._config.group_wake,
         )
         self._c2c_send = QQC2CSendService(
             channel_name=self.name,
             receive_mode=self._config.receive_mode,
             state=self._session_state,
             openapi=self._openapi,
-            passive_reply_window_seconds=self._config.passive_reply_window_seconds,
-            passive_replies_per_msg_id=self._config.passive_replies_per_msg_id,
+            passive_reply_window_seconds=_override(
+                self._config.passive_reply_window_seconds,
+                C2C_PASSIVE_REPLY_WINDOW_SECONDS,
+            ),
+            passive_replies_per_msg_id=_override(
+                self._config.passive_replies_per_msg_id, C2C_PASSIVE_REPLIES_PER_MSG_ID
+            ),
             workspace=self._workspace,
         )
         self._group_send = QQGroupSendService(
@@ -125,8 +136,14 @@ class QQChannel(Channel):
             receive_mode=self._config.receive_mode,
             state=self._session_state,
             openapi=self._openapi,
-            passive_reply_window_seconds=self._config.passive_reply_window_seconds,
-            passive_replies_per_msg_id=self._config.passive_replies_per_msg_id,
+            passive_reply_window_seconds=_override(
+                self._config.passive_reply_window_seconds,
+                GROUP_PASSIVE_REPLY_WINDOW_SECONDS,
+            ),
+            passive_replies_per_msg_id=_override(
+                self._config.passive_replies_per_msg_id,
+                GROUP_PASSIVE_REPLIES_PER_MSG_ID,
+            ),
             active_messages=self._config.active_messages,
             platform_store=self._platform_store,
             workspace=self._workspace,
@@ -508,7 +525,7 @@ class QQChannel(Channel):
             remember_session(
                 self._session_state,
                 session_id=channel_message.session_id,
-                message_id=str(event["id"]),
+                message_id=event_reply_id(str(event["id"])),
                 timestamp=str(event.get("timestamp") or "") or None,
             )
             qq_context = channel_message.context.get(QQ_CONTEXT_KEY)
@@ -569,6 +586,10 @@ class QQChannel(Channel):
                 f"qq receive_mode must be webhook or websocket, got {self._config.receive_mode!r}"
             )
         return mode
+
+
+def _override[T](value: T | None, default: T) -> T:
+    return default if value is None else value
 
 
 def _is_group_target(channel_name: str, message: ChannelMessage) -> bool:

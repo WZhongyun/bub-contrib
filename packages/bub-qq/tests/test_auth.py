@@ -590,3 +590,36 @@ def test_openapi_gives_up_after_second_401() -> None:
         assert calls["n"] == 2
 
     asyncio.run(_run())
+
+
+def test_replies_to_events_use_event_id() -> None:
+    async def _run() -> None:
+        bodies: list[dict] = []
+
+        async def token_handler(url: str, kwargs: dict[str, object]) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse(status=200, payload={"access_token": "t", "expires_in": 7200})
+
+        async def openapi_handler(request: OpenAPIRequest) -> FakeResponse:
+            bodies.append(dict(request.json or {}))
+            return FakeResponse(status=200, payload={"id": "ok"})
+
+        openapi = QQOpenAPI(
+            QQConfig(receive_mode="webhook"),
+            QQTokenProvider(
+                QQConfig(appid="app", secret="secret", receive_mode="webhook"),
+                client=FakeTokenClient(token_handler),
+            ),
+            client=FakeOpenAPIClient(openapi_handler),
+        )
+        await openapi.post_group_text_message(
+            group_openid="g", content="hi", msg_id="event:click-1", msg_seq=1
+        )
+        await openapi.post_group_markdown_message(
+            group_openid="g", content="**hi**", msg_id="msg-1", msg_seq=2
+        )
+
+        assert bodies[0]["event_id"] == "click-1" and "msg_id" not in bodies[0]
+        assert bodies[1]["msg_id"] == "msg-1" and "event_id" not in bodies[1]
+
+    asyncio.run(_run())
