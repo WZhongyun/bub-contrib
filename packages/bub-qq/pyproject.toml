@@ -8,10 +8,11 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "aiohttp>=3.13.3",
-    "bub",
-    "cryptography>=45.0.0",
+    "bub>=0.5.0,<0.6",
     "loguru",
+    "pydantic",
+    "aiohttp>=3.13.3",
+    "cryptography>=45.0.0",
     "pydantic-settings>=2.10.1",
 ]
 

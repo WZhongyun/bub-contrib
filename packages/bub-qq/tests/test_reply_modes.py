@@ -352,8 +352,20 @@ def _tool_context(qq_state: dict[str, object] | None) -> ToolContext:
     return ToolContext(tape=None, state=state)
 
 
-def _run_qq_send(content: str, context: ToolContext) -> str:
+def _run_qq_send(content: str, context: ToolContext) -> tools.QQSendResult:
     return asyncio.run(tools.qq_send.run(content=content, context=context))
+
+
+def test_qq_send_tool_declares_output_schema() -> None:
+    schema = tools.qq_send.output_schema
+
+    assert schema is not None
+    assert schema["properties"]["status"]["enum"] == [
+        "sent",
+        "pending_audit",
+        "already_sent",
+        "not_sent",
+    ]
 
 
 def test_qq_send_tool_disabled_in_direct_mode(monkeypatch) -> None:
@@ -361,8 +373,11 @@ def test_qq_send_tool_disabled_in_direct_mode(monkeypatch) -> None:
 
     result = _run_qq_send("hi", _tool_context({"scope": "c2c"}))
 
-    assert result.startswith("Not sent")
-    assert "direct" in result
+    assert result["status"] == "not_sent"
+    assert tools.qq_send.render(result) == (
+        "Not sent: qq.send is disabled (qq.reply_mode is 'direct')."
+        " Write your reply as plain text instead."
+    )
 
 
 def test_qq_send_tool_requires_qq_session(monkeypatch) -> None:
@@ -370,7 +385,10 @@ def test_qq_send_tool_requires_qq_session(monkeypatch) -> None:
 
     result = _run_qq_send("hi", _tool_context(None))
 
-    assert result.startswith("Not sent")
+    assert result == {
+        "status": "not_sent",
+        "reason": "qq.send is only available inside QQ channel sessions.",
+    }
 
 
 def test_qq_send_tool_sends_via_channel(monkeypatch) -> None:
@@ -392,7 +410,8 @@ def test_qq_send_tool_sends_via_channel(monkeypatch) -> None:
     finally:
         runtime.set_active_channel(None)
 
-    assert result == "Sent."
+    assert result == {"status": "sent"}
+    assert tools.qq_send.render(result) == "Sent."
     assert len(channel.messages) == 1
     sent = channel.messages[0]
     assert sent.session_id == "qq:group:group-openid"
@@ -422,7 +441,8 @@ def test_qq_send_tool_attaches_at_user_ids(monkeypatch) -> None:
     finally:
         runtime.set_active_channel(None)
 
-    assert result == "Sent."
+    text = tools.qq_send.render(result)
+    assert text == "Sent."
     outbound = channel.messages[0].context["_qq_outbound"]
     assert outbound["at_user_ids"] == ["member-openid"]
 
@@ -449,7 +469,8 @@ def test_qq_send_tool_attaches_media_url(monkeypatch) -> None:
     finally:
         runtime.set_active_channel(None)
 
-    assert result == "Sent."
+    text = tools.qq_send.render(result)
+    assert text == "Sent."
     sent = channel.messages[0]
     outbound = sent.context.get("_qq_outbound")
     assert isinstance(outbound, dict)
@@ -483,7 +504,8 @@ def test_qq_send_tool_rejects_media_path_outside_workspace(
     finally:
         runtime.set_active_channel(None)
 
-    assert "outbox" in result
+    text = tools.qq_send.render(result)
+    assert "outbox" in text
     assert channel.messages == []
 
 
@@ -508,7 +530,8 @@ def test_qq_send_tool_rejects_bad_media_url(monkeypatch) -> None:
     finally:
         runtime.set_active_channel(None)
 
-    assert result.startswith("Not sent")
+    text = tools.qq_send.render(result)
+    assert text.startswith("Not sent")
     assert channel.messages == []
 
 
@@ -520,11 +543,34 @@ def test_qq_send_tool_reports_statuses(monkeypatch) -> None:
         "session_id": "qq:c2c:user-openid",
     }
 
-    for channel_result, expected_prefix in [
-        (None, "Not sent"),
-        ({"status": "failed", "error_code": 22009, "error": "msg limit exceed"}, "Not sent"),
-        ({"status": "pending_audit"}, "Accepted"),
-        ({"status": "already_sent"}, "Skipped"),
+    for channel_result, expected_status, expected_text in [
+        (
+            None,
+            "not_sent",
+            (
+                "Not sent: the QQ channel skipped this send"
+                " (empty content, closed reply window, or no remaining passive replies;"
+                " see gateway logs). Do not retry with identical content."
+            ),
+        ),
+        (
+            {"status": "failed", "error_code": 22009, "error": "msg limit exceed"},
+            "not_sent",
+            (
+                "Not sent: QQ OpenAPI error code=22009 msg limit exceed."
+                " Do not retry with identical content."
+            ),
+        ),
+        (
+            {"status": "pending_audit"},
+            "pending_audit",
+            "Accepted: QQ queued the message for manual review before delivery.",
+        ),
+        (
+            {"status": "already_sent"},
+            "already_sent",
+            "Skipped: identical content was already sent for this reply window.",
+        ),
     ]:
         channel = FakeChannel(channel_result)
         runtime.set_active_channel(channel)
@@ -532,7 +578,8 @@ def test_qq_send_tool_reports_statuses(monkeypatch) -> None:
             result = _run_qq_send("hi", _tool_context(qq_state))
         finally:
             runtime.set_active_channel(None)
-        assert result.startswith(expected_prefix)
+        assert result["status"] == expected_status
+        assert tools.qq_send.render(result) == expected_text
         assert channel.messages[0].chat_id == "c2c:user-openid"
 
 
@@ -564,9 +611,10 @@ def test_qq_send_tool_explains_media_upload_timeout(monkeypatch) -> None:
     finally:
         runtime.set_active_channel(None)
 
-    assert "850027" in result
-    assert "media_path" in result
-    assert "Do not retry the same failed payload" in result
+    text = tools.qq_send.render(result)
+    assert "850027" in text
+    assert "media_path" in text
+    assert "Do not retry the same failed payload" in text
 
 
 def test_qq_send_tool_explains_media_download_failure(monkeypatch) -> None:
@@ -596,8 +644,9 @@ def test_qq_send_tool_explains_media_download_failure(monkeypatch) -> None:
     finally:
         runtime.set_active_channel(None)
 
-    assert "failed to download media_url" in result
-    assert "Do not retry the same media_url" in result
+    text = tools.qq_send.render(result)
+    assert "failed to download media_url" in text
+    assert "Do not retry the same media_url" in text
 
 
 def test_qq_send_tool_without_running_channel(monkeypatch) -> None:
@@ -606,5 +655,6 @@ def test_qq_send_tool_without_running_channel(monkeypatch) -> None:
 
     result = _run_qq_send("hi", _tool_context({"scope": "c2c"}))
 
-    assert result.startswith("Not sent")
-    assert "not running" in result
+    assert tools.qq_send.render(result) == (
+        "Not sent: the QQ channel is not running in this process."
+    )

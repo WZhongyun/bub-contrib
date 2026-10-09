@@ -17,6 +17,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
+from typing import Literal, NotRequired, TypedDict, final
 
 import aiohttp
 import bub
@@ -42,7 +43,30 @@ from .workspace import safe_filename
 from .workspace import workspace_from_state
 
 
-@tool(name=REPLY_TOOL_NAME, context=True)
+@final
+class QQSendResult(TypedDict):
+    """Outcome of one ``qq.send`` call; ``reason`` is set only for ``not_sent``."""
+
+    status: Literal["sent", "pending_audit", "already_sent", "not_sent"]
+    reason: NotRequired[str]
+
+
+def _not_sent(reason: str) -> QQSendResult:
+    return {"status": "not_sent", "reason": reason.removeprefix("Not sent: ")}
+
+
+def _render_send(result: QQSendResult) -> str:
+    status = result["status"]
+    if status == "not_sent":
+        return f"Not sent: {result.get('reason', '')}"
+    if status == "pending_audit":
+        return "Accepted: QQ queued the message for manual review before delivery."
+    if status == "already_sent":
+        return "Skipped: identical content was already sent for this reply window."
+    return "Sent."
+
+
+@tool(name=REPLY_TOOL_NAME, context=True, renderer=_render_send)
 async def qq_send(
     content: str = "",
     media_url: str | None = None,
@@ -51,7 +75,7 @@ async def qq_send(
     at_user_ids: str | list[str] | None = None,
     *,
     context: ToolContext,
-) -> str:
+) -> QQSendResult:
     """Send a message to the current QQ chat (group or private).
 
     Pass the message text, or media_url / workspace media_path for a
@@ -65,22 +89,22 @@ async def qq_send(
 
     config = bub.ensure_config(QQConfig)
     if config.reply_mode != "tool":
-        return (
-            "Not sent: qq.send is disabled (qq.reply_mode is 'direct')."
+        return _not_sent(
+            "qq.send is disabled (qq.reply_mode is 'direct')."
             " Write your reply as plain text instead."
         )
     qq_state = context.state.get(QQ_STATE_KEY)
     if not isinstance(qq_state, dict):
-        return "Not sent: qq.send is only available inside QQ channel sessions."
+        return _not_sent("qq.send is only available inside QQ channel sessions.")
     channel = get_active_channel()
     if channel is None:
-        return "Not sent: the QQ channel is not running in this process."
+        return _not_sent("the QQ channel is not running in this process.")
 
     if media_url and media_path:
-        return "Not sent: pass media_url or media_path, not both."
+        return _not_sent("pass media_url or media_path, not both.")
     media, media_error = media_spec_from_args(media_url, file_type)
     if media_error is not None:
-        return media_error
+        return _not_sent(media_error)
     if media_path:
         workspace = context.state.get("_runtime_workspace")
         workspace_text = (
@@ -88,9 +112,9 @@ async def qq_send(
         )
         resolved, path_error = resolve_media_path(media_path, workspace_text)
         if path_error is not None:
-            return path_error
+            return _not_sent(path_error)
         if resolved is None:
-            return "Not sent: media_path is empty."
+            return _not_sent("media_path is empty.")
         resolved_type = file_type if file_type is not None else infer_file_type(str(resolved))
         media = MediaSpec(
             file_type=resolved_type,
@@ -99,9 +123,9 @@ async def qq_send(
         )
     mentions, mention_error = parse_at_user_ids(at_user_ids)
     if mention_error is not None:
-        return mention_error
+        return _not_sent(mention_error)
     if not (content or "").strip() and media is None and not mentions:
-        return "Not sent: provide content, media_url, or at_user_ids."
+        return _not_sent("provide content, media_url, or at_user_ids.")
 
     session_id = str(qq_state.get("session_id") or "")
     if str(qq_state.get("scope") or "") == "group":
@@ -127,21 +151,21 @@ async def qq_send(
     return format_send_result(result)
 
 
-def format_send_result(result: dict[str, object] | None) -> str:
+def format_send_result(result: dict[str, object] | None) -> QQSendResult:
     if result is None:
-        return (
-            "Not sent: the QQ channel skipped this send"
+        return _not_sent(
+            "the QQ channel skipped this send"
             " (empty content, closed reply window, or no remaining passive replies;"
             " see gateway logs). Do not retry with identical content."
         )
     status = result.get("status")
     if status == "pending_audit":
-        return "Accepted: QQ queued the message for manual review before delivery."
+        return {"status": "pending_audit"}
     if status == "already_sent":
-        return "Skipped: identical content was already sent for this reply window."
+        return {"status": "already_sent"}
     if status == "failed":
-        return _format_failed_send(result)
-    return "Sent."
+        return _not_sent(_format_failed_send(result))
+    return {"status": "sent"}
 
 
 def _format_failed_send(result: dict[str, object]) -> str:

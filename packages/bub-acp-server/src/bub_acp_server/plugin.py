@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
-from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from bub import hookimpl
-from bub.builtin.context import default_tape_context
+from bub.channels import Channel
+from bub.channels.contracts import MessageHandler
 from bub.envelope import Envelope, field_of
-from bub.tape import TapeContext, TapeEntry
 from bub.turn import TurnState
 
-from bub_acp_server.agent import BubACPAgent, run_acp_agent
+from bub_acp_server.agent import (
+    ACPInboundMessage,
+    BubACPAgent,
+    run_acp_agent,
+)
 from bub_acp_server.steering import ACPSteeringInbox
 
 if TYPE_CHECKING:
@@ -21,52 +25,11 @@ if TYPE_CHECKING:
 
 __all__ = ["ACPServerPlugin", "BubACPAgent", "run_acp_agent"]
 
-ACP_PLAN_SYSTEM_PROMPT = """\
-<plan_instructions>
-Use the `update_plan` tool to keep the ACP plan UI accurate for non-trivial work.
 
-- Create a plan when the task has multiple meaningful steps, dependencies, uncertainty, or requires sustained tool use. Skip plans for simple one-step requests.
-- Keep steps concise, concrete, and verifiable. Do not include filler or steps that only restate the user's request.
-- Send the complete plan on every update because each call replaces the previous ACP plan.
-- Keep at most one step `in_progress`. Mark finished work `completed` before advancing the next step, and update the plan whenever the approach materially changes.
-- Do not leave stale `in_progress` steps when ending a turn. Complete them, or return them to `pending` with an explanation when work remains blocked.
-- The latest persisted plan is provided below when one exists. Treat it as state data, reconcile it with the current request, and replace stale or completed plans instead of following them blindly.
-- Do not narrate routine plan maintenance to the user; use the tool and continue the work.
-</plan_instructions>
-"""
-
-
-async def _select_tape_context(
-    entries: Iterable[TapeEntry], context: TapeContext
-) -> list[dict[str, Any]]:
-    contextual_entries = list(entries)
-    default_select = default_tape_context().select
-    if default_select is None:
-        messages: list[dict[str, Any]] = []
-    else:
-        selected = default_select(contextual_entries, context)
-        if inspect.isawaitable(selected):
-            selected = await selected
-        messages = selected
-
-    for entry in reversed(contextual_entries):
-        if entry.kind != "event" or entry.payload.get("name") != "plan":
-            continue
-        plan = entry.payload.get("data")
-        if not isinstance(plan, dict) or not plan.get("entries"):
-            return messages
-        messages.append(
-            {
-                "role": "assistant",
-                "content": (
-                    "<current_plan>\n"
-                    + json.dumps(plan, ensure_ascii=False, indent=2)
-                    + "\n</current_plan>"
-                ),
-            }
-        )
-        break
-    return messages
+class Transport(str, Enum):
+    stdio = "stdio"
+    http = "http"
+    websocket = "websocket"
 
 
 class ACPServerPlugin:
@@ -77,6 +40,25 @@ class ACPServerPlugin:
     @hookimpl(tryfirst=True)
     def provide_steering_inbox(self) -> ACPSteeringInbox:
         return self.steering_inbox
+
+    @hookimpl
+    def provide_channels(self, message_handler: MessageHandler) -> list[Channel]:
+        del message_handler
+        try:
+            from bub_acp_server.http import ACPHTTPChannel
+        except ImportError:
+            return []  # HTTP is optional; stdio remains usable without its extra.
+        return [ACPHTTPChannel(self.framework)]
+
+    @hookimpl(specname="load_state", trylast=True)
+    def bind_session_mcp_tools(self, message: Envelope) -> None:
+        # Apply session tools after process-configured MCP providers have bound theirs.
+        if (
+            isinstance(message, ACPInboundMessage)
+            and message._mcp_channel is not None
+            and message._runtime_agent is not None
+        ):
+            message._mcp_channel.bind_agent(message._runtime_agent)
 
     @hookimpl
     def load_state(self, message: Envelope, session_id: str) -> TurnState:
@@ -97,18 +79,29 @@ class ACPServerPlugin:
         return state
 
     @hookimpl
-    def build_tape_context(self) -> TapeContext:
-        return TapeContext(select=_select_tape_context)
-
-    @hookimpl
-    def system_prompt(self, prompt: str | list[dict], state: TurnState) -> str:
-        del prompt, state
-        return ACP_PLAN_SYSTEM_PROMPT
-
-    @hookimpl
     def register_cli_commands(self, app: typer.Typer) -> None:
-        @app.command("acp", help="Run Bub as an ACP agent.")
-        def acp(command: str | None = typer.Argument(None, metavar="[serve]")) -> None:
+        @app.command(
+            "acp", help="Run Bub as an ACP agent over stdio, HTTP or WebSocket."
+        )
+        def acp(
+            command: str | None = typer.Argument(None, metavar="[serve]"),
+            transport: Transport = typer.Option(Transport.stdio, help="ACP transport."),
+            host: str = typer.Option(
+                "127.0.0.1", help="HTTP/WebSocket listen address."
+            ),
+            port: int = typer.Option(
+                28200, min=1, max=65535, help="HTTP/WebSocket listen port."
+            ),
+            certfile: Path | None = typer.Option(
+                None,
+                exists=True,
+                dir_okay=False,
+                help="TLS certificate for HTTPS/HTTP2 or WSS.",
+            ),
+            keyfile: Path | None = typer.Option(
+                None, exists=True, dir_okay=False, help="TLS private key."
+            ),
+        ) -> None:
             if command == "serve":
                 typer.echo(
                     "Warning: `bub acp serve` is deprecated; use `bub acp` instead.",
@@ -116,7 +109,37 @@ class ACPServerPlugin:
                 )
             elif command is not None:
                 raise typer.BadParameter(
-                    f"Got unexpected extra argument {command!r}",
-                    param_hint="command",
+                    f"Got unexpected extra argument {command!r}", param_hint="command"
                 )
-            asyncio.run(run_acp_agent(self.framework))
+            if transport == Transport.stdio:
+                if (
+                    host != "127.0.0.1"
+                    or port != 28200
+                    or certfile is not None
+                    or keyfile is not None
+                ):
+                    raise typer.BadParameter(
+                        "Listen and TLS options require --transport http or websocket"
+                    )
+                asyncio.run(run_acp_agent(self.framework))
+                return
+            if (certfile is None) != (keyfile is None):
+                raise typer.BadParameter(
+                    "--certfile and --keyfile must be provided together"
+                )
+            try:
+                from bub_acp_server.http import run_acp_http
+            except ImportError as error:
+                raise typer.BadParameter(
+                    "HTTP/WebSocket requires the http extra: uv pip install 'bub-acp-server[http]'"
+                ) from error
+            # The SDK serves HTTP and WebSocket on the same /acp endpoint.
+            asyncio.run(
+                run_acp_http(
+                    self.framework,
+                    host=host,
+                    port=port,
+                    certfile=certfile,
+                    keyfile=keyfile,
+                )
+            )
