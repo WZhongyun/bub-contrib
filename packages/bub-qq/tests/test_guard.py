@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from bub.hooks.interception import ToolCall
 
+from bub_qq import security
 from bub_qq.approval import comma_command_to_call
 from bub_qq.config import QQConfig
 from bub_qq.guard import Requester
@@ -55,7 +56,7 @@ def _decide(tool, args, requester, ws, *, approved=False, **config):
 @pytest.mark.parametrize(
     ("tool", "args", "member", "admin"),
     [
-        ("bash", {"cmd": "ls"}, "deny", "approval"),
+        ("bash", {"command": "ls"}, "deny", "approval"),
         ("bash_output", {"shell_id": "1"}, "deny", "allow"),
         ("fs.read", {"path": "notes.md"}, "allow", "allow"),
         ("fs.read", {"path": "/etc/passwd"}, "deny", "deny"),
@@ -72,18 +73,65 @@ def test_group_decision_table(ws, tool, args, member, admin) -> None:
     assert _decide(tool, args, ADMIN, ws).action == admin
 
 
-def test_shell_approval_token_and_deny_setting(ws) -> None:
-    assert _decide("bash", {"cmd": "ls"}, ADMIN, ws, approved=True).action == "allow"
-    # A token never lets a non-admin through.
-    assert _decide("bash", {"cmd": "ls"}, MEMBER, ws, approved=True).action == "deny"
+@pytest.mark.parametrize(
+    ("tool", "member", "admin"),
+    [
+        # Code mode runs host Python outside shell approval: never in QQ.
+        ("run_code", "deny", "deny"),
+        ("code_mode", "deny", "deny"),
+        # Known read-only tools stay open to members.
+        ("tape.info", "allow", "allow"),
+        ("tape_search", "allow", "allow"),
+        ("tool.describe", "allow", "allow"),
+        ("spill.read", "allow", "allow"),
+        ("qq.fetch_attachment", "allow", "allow"),
+        # Known session-changing tools are admin-only.
+        ("tape.reset", "deny", "allow"),
+        ("reasoning_effort", "deny", "allow"),
+        # Anything not listed (other plugins, MCP, future Bub tools).
+        ("mcp.filesystem.write_file", "deny", "allow"),
+        ("web_search.jina_read", "deny", "allow"),
+    ],
+)
+def test_allowlist_in_group(ws, tool, member, admin) -> None:
+    assert _decide(tool, {}, MEMBER, ws).action == member
+    assert _decide(tool, {}, ADMIN, ws).action == admin
+
+
+def test_allowed_tools_opens_unknown_tools_to_members(ws) -> None:
+    assert _decide("web_search.jina_read", {}, MEMBER, ws).action == "deny"
     assert (
-        _decide("bash", {"cmd": "ls"}, ADMIN, ws, approved=True, group_shell="deny").action
+        _decide("web_search.jina_read", {}, MEMBER, ws, allowed_tools="web_search.*").action
+        == "allow"
+    )
+    # allowed_tools cannot unlock shell, code mode or admin-only tools.
+    for tool in ("bash", "run_code", "tape.reset"):
+        assert _decide(tool, {}, MEMBER, ws, allowed_tools="*").action == "deny"
+
+
+def test_unknown_tool_still_follows_tool_policy(ws) -> None:
+    assert (
+        _decide("web_search.jina_read", {}, ADMIN, ws, group_tool_policy="locked").action
+        == "deny"
+    )
+    assert (
+        _decide("web_search.jina_read", {}, ADMIN, ws, denied_tools="web_search.*").action
+        == "deny"
+    )
+
+
+def test_shell_approval_token_and_deny_setting(ws) -> None:
+    assert _decide("bash", {"command": "ls"}, ADMIN, ws, approved=True).action == "allow"
+    # A token never lets a non-admin through.
+    assert _decide("bash", {"command": "ls"}, MEMBER, ws, approved=True).action == "deny"
+    assert (
+        _decide("bash", {"command": "ls"}, ADMIN, ws, approved=True, group_shell="deny").action
         == "deny"
     )
 
 
 def test_locked_policy_blocks_everything_but_replies(ws) -> None:
-    for tool, args in (("bash", {"cmd": "ls"}), ("fs.read", {"path": "notes.md"})):
+    for tool, args in (("bash", {"command": "ls"}), ("fs.read", {"path": "notes.md"})):
         assert _decide(tool, args, ADMIN, ws, group_tool_policy="locked").action == "deny"
     assert (
         _decide("qq.send", {"content": "hi"}, MEMBER, ws, group_tool_policy="locked").action
@@ -101,7 +149,7 @@ def test_c2c_access(ws) -> None:
     )
     c2c_admin = Requester(scope="c2c", sender_id="u-1")
     assert (
-        _decide("bash", {"cmd": "ls"}, c2c_admin, ws, admin_users="c2c:u-1").action
+        _decide("bash", {"command": "ls"}, c2c_admin, ws, admin_users="c2c:u-1").action
         == "approval"
     )
 
@@ -135,17 +183,23 @@ def test_registered_admins_are_trusted_and_listed() -> None:
     [
         (",fs.read .env", "fs.read", {"path": ".env"}),
         (",fs.read path=notes.md", "fs.read", {"path": "notes.md"}),
-        (",ls -la /", "bash", {"cmd": "ls -la /"}),
+        (",ls -la /", "bash", {"command": "ls -la /"}),
         # Bub looks names up as typed: an alias runs as a shell line.
-        (",fs_read notes.md", "bash", {"cmd": "fs_read notes.md"}),
+        (",fs_read notes.md", "bash", {"command": "fs_read notes.md"}),
         (",qq.version", "qq.version", {}),
-        (",echo 'unbalanced", "bash", {"cmd": "echo 'unbalanced"}),
+        (",echo 'unbalanced", "bash", {"command": "echo 'unbalanced"}),
     ],
 )
 def test_comma_command_maps_like_bub(line, tool, arguments) -> None:
     call = comma_command_to_call(line)
     assert call.tool == tool
     assert call.arguments == arguments
+
+
+def test_command_mapping_uses_bub_command_prefix(monkeypatch) -> None:
+    monkeypatch.setattr(security, "command_prefix", lambda: "/")
+    assert comma_command_to_call("/fs.read notes.md").arguments == {"path": "notes.md"}
+    assert comma_command_to_call("/ls").arguments == {"command": "ls"}
 
 
 def test_comma_fs_read_of_protected_file_is_denied(ws) -> None:

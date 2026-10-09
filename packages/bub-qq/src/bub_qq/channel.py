@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -158,6 +159,7 @@ class QQChannel(Channel):
     async def start(self, stop_event: asyncio.Event | None) -> None:
         if not self._config.appid or not self._config.secret:
             raise RuntimeError("qq appid/secret is empty")
+        check_bub_version(bub.__version__)
         self._check_security_config()
         self._admins.bootstrap_code()
 
@@ -585,6 +587,24 @@ class QQChannel(Channel):
                 f"qq receive_mode must be webhook or websocket, got {self._config.receive_mode!r}"
             )
         return mode
+
+
+# Bub minor releases change the internals this plugin relies on (tool
+# names and arguments, the command path, approval execution), so only the
+# minor series it was built against is accepted.
+SUPPORTED_BUB_SERIES = (0, 5)
+
+
+def check_bub_version(version: str) -> None:
+    """Refuse to start on a Bub release outside :data:`SUPPORTED_BUB_SERIES`."""
+
+    match = re.match(r"(\d+)\.(\d+)", version)
+    if match is None or (int(match[1]), int(match[2])) != SUPPORTED_BUB_SERIES:
+        major, minor = SUPPORTED_BUB_SERIES
+        raise RuntimeError(
+            f"bub-qq needs Bub {major}.{minor}.x, but Bub {version} is installed;"
+            f" install 'bub>={major}.{minor}.0,<{major}.{minor + 1}'"
+        )
 
 
 def _override[T](value: T | None, default: T) -> T:

@@ -33,6 +33,22 @@ QQ_STATE_KEY = "qq"
 # would mute the bot entirely.
 REPLY_TOOL_NAME = "qq.send"
 
+
+def command_prefix() -> str:
+    """Bub's configured command prefix (``BUB_COMMAND_PREFIX``, ``,`` by default)."""
+
+    from bub.builtin.settings import load_settings
+
+    return load_settings().command_prefix
+
+
+def strip_command(text: str) -> str | None:
+    """The command without Bub's prefix, or None when ``text`` is not one."""
+
+    from bub.builtin.commands import strip_command_prefix
+
+    return strip_command_prefix(text, command_prefix())
+
 RESTRICTED_TOOL_PATTERNS: tuple[str, ...] = (
     "bash",
     "bash.*",

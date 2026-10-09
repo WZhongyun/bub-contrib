@@ -23,7 +23,7 @@ English documentation: [README.md](./README.md)
 
 ## 前置条件
 
-1. [安装 Bub](https://bub.build/zh-cn/docs/getting-started/install/)（推荐：`uv tool install bub`）
+1. [安装 Bub](https://bub.build/zh-cn/docs/getting-started/install/) 0.5.x（推荐：`uv tool install bub`）。bub-qq 只支持 `bub>=0.5.0,<0.6`，版本不符时拒绝启动
 2. 执行 `bub onboard`，确认模型可用（`bub chat` 或 `bub run`）
 3. 在 [QQ 开放平台 / 机器人文档](https://bot.q.qq.com/wiki/develop/api-v2/) 创建机器人，获取 `APPID`、`SECRET`
 
@@ -164,6 +164,7 @@ QQ 侧将 webhook 与 WebSocket 视为 **互斥**。成功配置有效的 HTTPS 
 | `download_allow_hosts` | `BUB_QQ_DOWNLOAD_ALLOW_HOSTS` | 空 | 逗号分隔的主机名；`media_url`、`web.fetch` 和附件下载访问它们时即使解析到内网地址也放行（如内网图床） |
 | `group_tool_policy` | `BUB_QQ_GROUP_TOOL_POLICY` | `restricted` | 群聊中 shell 和文件以外其他工具的策略：`open` / `restricted`（禁用 `subagent` 和 `denied_tools`）/ `locked`（除回复外禁用全部工具，管理员也一样） |
 | `c2c_tool_policy` | `BUB_QQ_C2C_TOOL_POLICY` | `open` | 同上，作用于 `c2c_access` 允许的私聊用户 |
+| `allowed_tools` | `BUB_QQ_ALLOWED_TOOLS` | 空 | 允许非管理员使用的额外工具名 glob，逗号分隔，如 `web_search.*`。内置清单和这里都没有的工具只给管理员用；shell、code mode 和改动会话的工具不受影响 |
 | `denied_tools` | `BUB_QQ_DENIED_TOOLS` | 空 | `restricted` 策略下额外禁用的工具名 glob，逗号分隔，如 `web.fetch,tape.*` |
 | `llm_rate_limit_per_minute` | `BUB_QQ_LLM_RATE_LIMIT_PER_MINUTE` | `0` | 每发送者在每个会话内每分钟的 LLM 调用上限；`0` 表示不限 |
 | `llm_rate_limit_notice` | `BUB_QQ_LLM_RATE_LIMIT_NOTICE` | `请求过于频繁，请稍后再试。` | 触发频控时回复的文本 |
@@ -230,7 +231,10 @@ export BUB_QQ_RECEIVE_MODE=websocket
 | 受保护文件（`.env*`、`.git/`、状态文件） | 拒绝 | 拒绝 |
 | 发送文件（`qq.send media_path`） | 仅 `outbox/`、`inbox/` | 同左 |
 | 下载（`media_url`、`web.fetch`、附件） | 仅公网地址，每一跳重定向都检查 | 同左 |
-| 其他工具 | `group_tool_policy` / `c2c_tool_policy` | 同左 |
+| code mode（`run_code` / `code_mode`） | 拒绝 | 拒绝 |
+| 只读工具（`tape.info` / `tape.search` / `tape.anchors` / `tape.handoff`、`skill`、`tool.describe`、`spill.read`、`help`、`qq.fetch_attachment`） | `group_tool_policy` / `c2c_tool_policy` | 同左 |
+| 改动会话的工具（`tape.reset`、`subagent`、`model`、`reasoning_effort`、`quit`） | 拒绝 | `group_tool_policy` / `c2c_tool_policy` |
+| 未列出的工具（其他插件、MCP、Bub 新增的工具） | 拒绝，除非匹配 `allowed_tools` | `group_tool_policy` / `c2c_tool_policy` |
 
 私聊中默认只有管理员能用工具（`c2c_access`），回复始终可用。
 
@@ -254,7 +258,7 @@ qq.admin.unclaimed no admins configured; send ',qq.claim K7QX2M9PHT' to the bot 
 
 ### 运维逗号命令
 
-逗号命令只接受管理员发送；其他人的 `,` 消息作为普通文本交给模型。每条命令都按 Bub 实际执行的方式由 Guard 检查。
+命令前缀跟随 Bub 的 `BUB_COMMAND_PREFIX`（默认 `,`，下文以 `,` 为例）。逗号命令只接受管理员发送；其他人的 `,` 消息作为普通文本交给模型。每条命令都按 Bub 实际执行的方式由 Guard 检查。
 
 | 命令 | 说明 |
 | --- | --- |

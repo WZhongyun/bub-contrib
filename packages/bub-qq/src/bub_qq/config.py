@@ -194,6 +194,14 @@ class QQConfig(bub.Settings):
         default="open",
         description="Tool policy for C2C sessions; same values as group_tool_policy.",
     )
+    allowed_tools: str = Field(
+        default="",
+        description=(
+            "Extra comma-separated tool-name glob patterns non-admins may use,"
+            " e.g. 'web_search.*'. Tools outside the built-in allowlist and"
+            " these patterns are admin-only."
+        ),
+    )
     denied_tools: str = Field(
         default="",
         description=(

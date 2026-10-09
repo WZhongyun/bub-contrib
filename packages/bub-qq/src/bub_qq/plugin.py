@@ -220,6 +220,24 @@ async def before_tool_call(
     qq_state = _qq_state(state)
     if qq_state is None:
         return None
+    try:
+        return await _check_tool_call(call, state, qq_state)
+    except Exception:
+        # Bub logs a failing before_tool_call and runs the tool anyway, so
+        # an error in the Guard must deny here rather than propagate.
+        logger.exception(
+            "qq.security.guard_error tool={} session_id={}",
+            call.tool,
+            qq_state.get("session_id"),
+        )
+        return ToolCallDecision.deny(
+            "The QQ permission check failed, so this call was blocked."
+        )
+
+
+async def _check_tool_call(
+    call: ToolCall, state: TurnState, qq_state: dict[str, Any]
+) -> ToolCallDecision | None:
     config = bub.ensure_config(QQConfig)
     requester = Requester.from_state(qq_state)
     session_id = str(qq_state.get("session_id") or "")

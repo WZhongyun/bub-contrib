@@ -30,6 +30,7 @@ from .guard import canonical_tool
 from .guard import group_admin_member_ids
 from .guard import is_admin
 from .runtime import get_active_channel
+from .security import strip_command
 from .session import BoundedDict
 
 if TYPE_CHECKING:
@@ -130,18 +131,20 @@ def comma_command_to_call(line: str) -> ToolCall:
 
     from . import tools as _qq_tools  # noqa: F401
 
-    body = line[1:].strip() if line.startswith(",") else line.strip()
+    body = strip_command(line)
+    if body is None:
+        body = line.strip()
     if not body:
         raise ValueError("empty command")
     try:
         words = shlex.split(body)
     except ValueError:
         # Bub cannot parse it either; treat it as the shell line it would be.
-        return ToolCall(run_id="command", tool="bash", arguments={"cmd": body})
+        return ToolCall(run_id="command", tool="bash", arguments={"command": body})
     name = words[0]
     tool = REGISTRY.get(name)
     if tool is None:
-        return ToolCall(run_id="command", tool="bash", arguments={"cmd": body})
+        return ToolCall(run_id="command", tool="bash", arguments={"command": body})
     params = list((tool.parameters or {}).get("properties", {}))
     arguments: dict[str, Any] = {}
     positional = 0
@@ -158,9 +161,10 @@ def comma_command_to_call(line: str) -> ToolCall:
 
 def preview_call(tool: str, arguments: dict[str, Any], command_line: str = "") -> str:
     if command_line:
-        return command_line.lstrip(",").strip()
-    if set(arguments) <= {"cmd", "cwd"} and "cmd" in arguments:
-        text = str(arguments.get("cmd") or "")
+        stripped = strip_command(command_line)
+        return command_line.strip() if stripped is None else stripped
+    if set(arguments) <= {"command", "cwd"} and "command" in arguments:
+        text = str(arguments.get("command") or "")
         if arguments.get("cwd"):
             text = f"(cwd={arguments['cwd']}) {text}"
         return text

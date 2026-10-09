@@ -124,11 +124,11 @@ def test_parse_approval_button() -> None:
 def test_token_is_single_use_exact_and_expires(monkeypatch) -> None:
     now = [100.0]
     monkeypatch.setattr(approval, "_clock", lambda: now[0])
-    call = ToolCall(run_id="r", tool="bash", arguments={"cmd": "ls"})
+    call = ToolCall(run_id="r", tool="bash", arguments={"command": "ls"})
     pending = approval.PendingApproval(
         id="p1",
         tool="bash",
-        arguments={"cmd": "ls"},
+        arguments={"command": "ls"},
         requester=ADMIN,
         session_id=SESSION,
         chat_id="group:group-1",
@@ -137,7 +137,7 @@ def test_token_is_single_use_exact_and_expires(monkeypatch) -> None:
     )
 
     issue_token(pending)
-    changed = ToolCall(run_id="r", tool="bash", arguments={"cmd": "ls /"})
+    changed = ToolCall(run_id="r", tool="bash", arguments={"command": "ls /"})
     assert not consume_token(SESSION, ADMIN, changed)
     assert not consume_token(SESSION, MEMBER, call)
     assert consume_token(SESSION, ADMIN, call)
@@ -151,13 +151,27 @@ def test_token_is_single_use_exact_and_expires(monkeypatch) -> None:
 # --- before_tool_call ------------------------------------------------------
 
 
+def test_guard_error_denies_the_call(config, tmp_path, monkeypatch) -> None:
+    def boom(*args, **kwargs):
+        raise RuntimeError("store unreadable")
+
+    monkeypatch.setattr(plugin, "evaluate", boom)
+    decision = _hook(
+        ToolCall(run_id="r", tool="tape.info", arguments={}),
+        _state(ADMIN, tmp_path),
+    )
+    assert decision is not None
+    assert decision.action == "deny"
+
+
+
 def test_admin_shell_posts_full_command_card(config, tmp_path) -> None:
     channel = FakeChannel()
     set_active_channel(channel)
     command = "ls -la && echo `whoami`"
 
     decision = _hook(
-        ToolCall(run_id="r", tool="bash", arguments={"cmd": command}),
+        ToolCall(run_id="r", tool="bash", arguments={"command": command}),
         _state(ADMIN, tmp_path),
     )
 
@@ -178,7 +192,7 @@ def test_non_admin_shell_is_denied_whatever_the_qq_role(config, tmp_path, role) 
     channel = FakeChannel()
     set_active_channel(channel)
     decision = _hook(
-        ToolCall(run_id="r", tool="bash", arguments={"cmd": "uname"}),
+        ToolCall(run_id="r", tool="bash", arguments={"command": "uname"}),
         _state(MEMBER, tmp_path, role=role),
     )
     assert decision is not None and decision.action == "deny"
@@ -191,7 +205,7 @@ def test_over_long_command_is_refused_not_truncated(config, tmp_path) -> None:
     set_active_channel(channel)
     command = "echo safe" + " " * PREVIEW_LIMIT + "; rm -rf ~"
     decision = _hook(
-        ToolCall(run_id="r", tool="bash", arguments={"cmd": command}),
+        ToolCall(run_id="r", tool="bash", arguments={"command": command}),
         _state(ADMIN, tmp_path),
     )
     assert decision is not None and decision.action == "replace"
@@ -230,7 +244,7 @@ def executor(monkeypatch):
 def _request_admin_shell(tmp_path, command="uname -a"):
     set_active_channel(FakeChannel())
     _hook(
-        ToolCall(run_id="r", tool="bash", arguments={"cmd": command}),
+        ToolCall(run_id="r", tool="bash", arguments={"command": command}),
         _state(ADMIN, tmp_path),
     )
     return _only_pending()
@@ -259,10 +273,10 @@ def test_admin_allow_runs_exactly_the_shown_call(config, tmp_path, executor) -> 
     notice = asyncio.run(complete_approval_click(plan))
 
     assert plan.ack_code == approval.ACK_OK
-    assert executor.calls == [("bash", {"cmd": "uname -a"})]
+    assert executor.calls == [("bash", {"command": "uname -a"})]
     assert notice is not None and "已允许" in notice and "ran" in notice
     # The token was spent by that execution.
-    call = ToolCall(run_id="r", tool="bash", arguments={"cmd": "uname -a"})
+    call = ToolCall(run_id="r", tool="bash", arguments={"command": "uname -a"})
     assert not consume_token(SESSION, ADMIN, call)
     # A second tap finds nothing to approve.
     again = begin_approval_click(

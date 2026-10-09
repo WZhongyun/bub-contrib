@@ -23,7 +23,7 @@ Plugin entry point: `qq` → `bub_qq.plugin`. Supports **single-chat (C2C)** and
 
 ## Prerequisites
 
-1. [Install Bub](https://bub.build/docs/getting-started/install/) (recommended: `uv tool install bub`)
+1. [Install Bub](https://bub.build/docs/getting-started/install/) 0.5.x (recommended: `uv tool install bub`). bub-qq supports only `bub>=0.5.0,<0.6` and refuses to start on other versions
 2. Run `bub onboard` and ensure model access works (`bub chat` or `bub run`)
 3. Create a QQ bot on the [QQ Open Platform](https://bot.q.qq.com/wiki/develop/api-v2/) and obtain `APPID` / `SECRET`
 
@@ -164,6 +164,7 @@ Gateway start fails if `appid` / `secret` are empty, or if `receive_mode` is not
 | `download_allow_hosts` | `BUB_QQ_DOWNLOAD_ALLOW_HOSTS` | empty | Comma-separated hostnames that `media_url`, `web.fetch` and attachment downloads may reach even on private addresses (e.g. an intranet image host) |
 | `group_tool_policy` | `BUB_QQ_GROUP_TOOL_POLICY` | `restricted` | Policy for tools other than shell and files in groups: `open` / `restricted` (denies `subagent` and `denied_tools`) / `locked` (denies every tool except replies, admins included) |
 | `c2c_tool_policy` | `BUB_QQ_C2C_TOOL_POLICY` | `open` | Same, for C2C users allowed by `c2c_access` |
+| `allowed_tools` | `BUB_QQ_ALLOWED_TOOLS` | empty | Extra comma-separated tool-name glob patterns non-admins may use, e.g. `web_search.*`. Tools outside the built-in list and these patterns are admin-only; shell, code mode and session-changing tools are unaffected |
 | `denied_tools` | `BUB_QQ_DENIED_TOOLS` | empty | Extra comma-separated tool-name glob patterns denied under `restricted`, e.g. `web.fetch,tape.*` |
 | `llm_rate_limit_per_minute` | `BUB_QQ_LLM_RATE_LIMIT_PER_MINUTE` | `0` | Max LLM calls per sender per session per minute; `0` disables |
 | `llm_rate_limit_notice` | `BUB_QQ_LLM_RATE_LIMIT_NOTICE` | `请求过于频繁，请稍后再试。` | Reply text used when a sender hits the LLM rate limit |
@@ -230,7 +231,10 @@ Every action a chat can trigger passes one checkpoint, the **Guard**: model tool
 | protected files (`.env*`, `.git/`, the state file) | denied | denied |
 | send a file (`qq.send media_path`) | only `outbox/` and `inbox/` | same |
 | downloads (`media_url`, `web.fetch`, attachments) | public internet only, every redirect checked | same |
-| other tools | `group_tool_policy` / `c2c_tool_policy` | same |
+| code mode (`run_code` / `code_mode`) | denied | denied |
+| read-only tools (`tape.info` / `tape.search` / `tape.anchors` / `tape.handoff`, `skill`, `tool.describe`, `spill.read`, `help`, `qq.fetch_attachment`) | `group_tool_policy` / `c2c_tool_policy` | same |
+| session-changing tools (`tape.reset`, `subagent`, `model`, `reasoning_effort`, `quit`) | denied | `group_tool_policy` / `c2c_tool_policy` |
+| unlisted tools (other plugins, MCP, tools new in Bub) | denied unless matched by `allowed_tools` | `group_tool_policy` / `c2c_tool_policy` |
 
 In C2C, tools are admin-only by default (`c2c_access`); replies always work.
 
@@ -254,7 +258,7 @@ Also in place: allowlists (`allow_users` / `allow_groups`) drop other chats befo
 
 ### Ops comma commands
 
-Comma commands are accepted only from admins; anyone else's `,` message reaches the model as plain text. Each command is checked by the Guard exactly as Bub will run it.
+The command prefix follows Bub's `BUB_COMMAND_PREFIX` (`,` by default and in the examples below). Comma commands are accepted only from admins; anyone else's `,` message reaches the model as plain text. Each command is checked by the Guard exactly as Bub will run it.
 
 | Command | Description |
 | --- | --- |

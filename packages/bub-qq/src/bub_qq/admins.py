@@ -28,7 +28,9 @@ from .guard import Requester
 from .guard import admin_entries
 from .guard import is_admin
 from .guard import set_registered_admins
+from .security import command_prefix
 from .security import parse_id_list
+from .security import strip_command
 
 if TYPE_CHECKING:
     from .config import QQConfig
@@ -41,8 +43,8 @@ LOCKOUT_SECONDS = 600.0
 CODE_LENGTH = 10
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I
 
-CLAIM_COMMAND = ",qq.claim"
-ADMINS_COMMAND = ",qq.admins"
+CLAIM_COMMAND = "qq.claim"
+ADMINS_COMMAND = "qq.admins"
 
 
 @dataclass(frozen=True)
@@ -93,8 +95,10 @@ class AdminRegistry:
         self._codes[code] = _PairingCode("bootstrap", now + BOOTSTRAP_TTL_SECONDS)
         minutes = int(BOOTSTRAP_TTL_SECONDS // 60)
         logger.warning(
-            "qq.admin.unclaimed no admins configured; send ',qq.claim {}' to the bot"
+            "qq.admin.unclaimed no admins configured; send '{}{} {}' to the bot"
             " in a private (C2C) chat within {} minutes to become its admin",
+            command_prefix(),
+            CLAIM_COMMAND,
             code,
             minutes,
         )
@@ -103,7 +107,8 @@ class AdminRegistry:
     def handle(self, text: str, requester: Requester) -> str | None:
         """Reply for a claim/admins command, or None when ``text`` is not one."""
 
-        words = text.strip().split()
+        body = strip_command(text)
+        words = body.split() if body is not None else []
         if not words:
             return None
         if words[0] == CLAIM_COMMAND:
@@ -116,7 +121,8 @@ class AdminRegistry:
 
     def _claim(self, args: list[str], requester: Requester) -> str:
         if not args:
-            return "用法：,qq.claim <配对码>；管理员在单聊中发送 ,qq.claim group 获取群登记码。"
+            claim = f"{command_prefix()}{CLAIM_COMMAND}"
+            return f"用法：{claim} <配对码>；管理员在单聊中发送 {claim} group 获取群登记码。"
         if args[0].lower() == "group":
             return self._issue_group_code(requester)
         identity = requester.identity
@@ -153,7 +159,7 @@ class AdminRegistry:
 
     def _issue_group_code(self, requester: Requester) -> str:
         if requester.scope != "c2c":
-            return "请在与机器人的单聊中发送 ,qq.claim group。"
+            return f"请在与机器人的单聊中发送 {command_prefix()}{CLAIM_COMMAND} group。"
         if not is_admin(self._config, requester):
             return "只有管理员可以生成群登记码。"
         code = _new_code()
@@ -162,7 +168,7 @@ class AdminRegistry:
         )
         minutes = int(GROUP_CODE_TTL_SECONDS // 60)
         return (
-            f"群登记码：{code}\n在目标群里发送 ,qq.claim {code}"
+            f"群登记码：{code}\n在目标群里发送 {command_prefix()}{CLAIM_COMMAND} {code}"
             f"（{minutes} 分钟内有效，只能使用一次）。"
         )
 
@@ -197,5 +203,5 @@ class AdminRegistry:
         lines = ["管理员："]
         lines += [f"- {entry}（配置）" for entry in sorted(configured)]
         lines += [f"- {entry}（已登记）" for entry in sorted(registered - configured)]
-        lines.append("移除已登记的管理员：,qq.admins remove <身份>")
+        lines.append(f"移除已登记的管理员：{command_prefix()}{ADMINS_COMMAND} remove <身份>")
         return "\n".join(lines)

@@ -9,6 +9,7 @@ from loguru import logger
 from ..protocol.models import QQC2CMessage
 from ..guard import Requester
 from ..security import QQ_CONTEXT_KEY
+from ..security import strip_command
 from .common import attachment_payloads
 from .common import exclude_none
 from .common import QQInboundService
@@ -62,7 +63,7 @@ def build_c2c_channel_message(
         }
     }
 
-    if text.startswith(","):
+    if strip_command(text) is not None:
         if allow_command:
             return ChannelMessage(
                 session_id=session_id,

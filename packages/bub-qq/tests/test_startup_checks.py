@@ -5,6 +5,7 @@ from bub import configure
 from loguru import logger
 
 from bub_qq.channel import QQChannel
+from bub_qq.channel import check_bub_version
 
 
 @pytest.fixture
@@ -78,3 +79,14 @@ def test_send_services_get_platform_limits_per_scope(make_channel) -> None:
     tuned = make_channel(passive_reply_window_seconds=120, passive_replies_per_msg_id=2)
     assert tuned._group_send._passive_reply_window_seconds == 120
     assert tuned._c2c_send._passive_replies_per_msg_id == 2
+
+
+@pytest.mark.parametrize("version", ["0.5.0", "0.5.1.dev11+gb4a61bf13", "0.5.9"])
+def test_supported_bub_versions_start(version) -> None:
+    check_bub_version(version)
+
+
+@pytest.mark.parametrize("version", ["0.4.2", "0.6.0", "1.0.0", "unknown"])
+def test_unsupported_bub_versions_refuse_to_start(version) -> None:
+    with pytest.raises(RuntimeError, match=r"needs Bub 0\.5\.x"):
+        check_bub_version(version)

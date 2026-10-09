@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -30,7 +31,16 @@ if TYPE_CHECKING:
     from .config import QQConfig
 
 type Resource = Literal[
-    "reply", "shell", "shell_session", "fs_read", "fs_write", "fetch", "other"
+    "reply",
+    "shell",
+    "shell_session",
+    "code",
+    "fs_read",
+    "fs_write",
+    "fetch",
+    "safe",
+    "admin_only",
+    "unknown",
 ]
 type Action = Literal["allow", "deny", "approval"]
 
@@ -39,6 +49,42 @@ _SHELL_SESSION_TOOLS = frozenset({"bash.output", "bash.kill"})
 _FS_READ_TOOLS = frozenset({"fs.read"})
 _FS_WRITE_TOOLS = frozenset({"fs.write", "fs.edit"})
 _FETCH_TOOLS = frozenset({"web.fetch"})
+# Code mode runs model-written Python as a host process. Approvals execute
+# outside the session's code-mode state, so it cannot be approved per call;
+# it is refused in QQ sessions.
+_CODE_TOOLS = frozenset({"run_code", "code_mode"})
+# Known tools that only read session state or this chat: anyone the tool
+# policy admits may use them.
+_SAFE_TOOLS = frozenset(
+    {
+        "help",
+        "skill",
+        "spill.read",
+        "tape.anchors",
+        "tape.handoff",
+        "tape.info",
+        "tape.search",
+        "tool.describe",
+        "qq.fetch_attachment",
+        "qq.version",
+    }
+)
+# Known tools that change the session or reach beyond this chat.
+_ADMIN_TOOLS = frozenset(
+    {"model", "quit", "reasoning_effort", "subagent", "tape.reset"}
+)
+
+_CLASSES: tuple[tuple[Resource, frozenset[str]], ...] = (
+    ("reply", frozenset({REPLY_TOOL_NAME})),
+    ("shell", _SHELL_TOOLS),
+    ("shell_session", _SHELL_SESSION_TOOLS),
+    ("code", _CODE_TOOLS),
+    ("fs_read", _FS_READ_TOOLS),
+    ("fs_write", _FS_WRITE_TOOLS),
+    ("fetch", _FETCH_TOOLS),
+    ("safe", _SAFE_TOOLS),
+    ("admin_only", _ADMIN_TOOLS),
+)
 
 _registered_admins: frozenset[str] = frozenset()
 
@@ -125,23 +171,26 @@ def canonical_tool(tool: str) -> str:
     return tool.replace("_", ".", 1) if "." not in tool and "_" in tool else tool
 
 
-def classify(call: ToolCall) -> Resource:
-    tool = canonical_tool(call.tool)
-    if tool == REPLY_TOOL_NAME:
-        return "reply"
-    if tool in _SHELL_TOOLS:
-        return "shell"
-    if tool in _SHELL_SESSION_TOOLS:
-        return "shell_session"
-    if tool in _FS_READ_TOOLS:
-        return "fs_read"
-    if tool in _FS_WRITE_TOOLS:
-        return "fs_write"
-    if tool in _FETCH_TOOLS:
-        # Allowed by policy like other tools, but the plugin performs the
-        # fetch itself so it can only reach public addresses.
-        return "fetch"
-    return "other"
+def _name_forms(tool: str) -> frozenset[str]:
+    """Registry and model-facing spellings (``fs_read`` → ``fs.read``).
+
+    Some registry names contain ``_`` themselves (``run_code``), so the raw
+    name is always kept alongside the dotted forms.
+    """
+
+    return frozenset({tool, tool.replace("_", ".", 1), tool.replace("_", ".")})
+
+
+def classify(call: ToolCall, *, extra_safe_patterns: Iterable[str] = ()) -> Resource:
+    """Resource class of one call. Tools nobody listed are ``unknown``."""
+
+    forms = _name_forms(call.tool)
+    for resource, names in _CLASSES:
+        if forms & names:
+            return resource
+    if any(fnmatchcase(form, pattern) for form in forms for pattern in extra_safe_patterns):
+        return "safe"
+    return "unknown"
 
 
 def evaluate(
@@ -155,7 +204,7 @@ def evaluate(
 ) -> Decision:
     """Decide one call. ``approved`` means a valid approval token was used."""
 
-    resource = classify(call)
+    resource = classify(call, extra_safe_patterns=parse_id_list(config.allowed_tools))
     protected_reason = tool_protected_reason(call, workspace, extra=tuple(protected))
     if protected_reason is not None:
         return Decision("deny", resource, protected_reason)
@@ -175,6 +224,13 @@ def evaluate(
     )
     if tool_policy == "locked":
         return Decision("deny", resource, "Tool calls are disabled in this chat.")
+
+    if resource == "code":
+        return Decision(
+            "deny",
+            resource,
+            "Code mode (run_code) is not available in QQ chats; use bash, which needs admin approval.",
+        )
 
     if resource == "shell":
         if not admin:
@@ -203,6 +259,16 @@ def evaluate(
                     f"path '{raw}' is outside the workspace ({workspace}).",
                 )
         return Decision("allow", resource)
+
+    if resource in {"admin_only", "unknown"} and not admin:
+        if resource == "unknown":
+            reason = (
+                f"Tool '{call.tool}' is admin-only here: it is not on the QQ allowlist"
+                " (an admin can add it to allowed_tools)."
+            )
+        else:
+            reason = f"Tool '{call.tool}' is admin-only."
+        return Decision("deny", resource, reason)
 
     reason = denied_tool_reason(
         tool=call.tool,
