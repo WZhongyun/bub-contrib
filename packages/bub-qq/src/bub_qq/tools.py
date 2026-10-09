@@ -7,17 +7,18 @@ silent. It reuses the channel's send services, so passive
 ``msg_id``/``msg_seq`` targeting, dedupe and the active-message fallback
 all behave exactly as in direct mode.
 
-Tools registered with ``agent_use=False`` are ops comma commands: they
-never appear in the model's tool list and can only be requested as
+Tools registered as command-only (see :func:`_command_only`) are ops comma
+commands: they never appear in the model's tool list and can only be requested as
 ``,name`` by admins; every comma command still passes the Guard.
 """
 
 from __future__ import annotations
 
+import inspect
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
-from typing import Literal, NotRequired, TypedDict, final
+from typing import Any, Literal, NotRequired, TypedDict, final
 
 import aiohttp
 import bub
@@ -243,7 +244,19 @@ async def qq_fetch_attachment(
     return f"Downloaded to {dest} ({dest.stat().st_size} bytes)."
 
 
-@tool(name="qq.version", agent_use=False)
+def _command_only() -> dict[str, Any]:
+    """``@tool`` options for a comma-command-only tool.
+
+    Bub 0.5.0 spells this ``agent_use=False``; later Bub replaced the flag
+    with ``exposure="command"`` (bubbuild/bub#347).
+    """
+
+    if "exposure" in inspect.signature(tool).parameters:
+        return {"exposure": "command"}
+    return {"agent_use": False}
+
+
+@tool(name="qq.version", **_command_only())
 def qq_version() -> str:
     """Show the installed bub-qq plugin version (ops comma command)."""
 

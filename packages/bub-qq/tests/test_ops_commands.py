@@ -7,11 +7,16 @@ from bub.tools import REGISTRY
 from bub_qq import tools
 
 
-def test_qq_version_is_registered_as_command_only() -> None:
-    tool = REGISTRY["qq.version"]
+def _command_only(tool) -> bool:
+    # Bub 0.5.0 has ``agent_use``; later Bub has ``exposure`` (bubbuild/bub#347).
+    if hasattr(tool, "exposure"):
+        return tool.exposure == "command"
+    return tool.agent_use is False
 
-    assert tool.agent_use is False
-    assert REGISTRY["qq.send"].agent_use is True
+
+def test_qq_version_is_registered_as_command_only() -> None:
+    assert _command_only(REGISTRY["qq.version"])
+    assert not _command_only(REGISTRY["qq.send"])
 
 
 def test_qq_version_reports_package_version() -> None:

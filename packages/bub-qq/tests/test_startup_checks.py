@@ -81,9 +81,16 @@ def test_send_services_get_platform_limits_per_scope(make_channel) -> None:
     assert tuned._c2c_send._passive_replies_per_msg_id == 2
 
 
-@pytest.mark.parametrize("version", ["0.5.0", "0.5.1.dev11+gb4a61bf13", "0.5.9"])
-def test_supported_bub_versions_start(version) -> None:
+@pytest.mark.parametrize("version", ["0.5.0", "0.5.9", "0.5.1+local"])
+def test_supported_bub_releases_start_quietly(version, logs) -> None:
     check_bub_version(version)
+    assert not any("qq.bub.prerelease" in line for line in logs)
+
+
+@pytest.mark.parametrize("version", ["0.5.1.dev15+g085dcd9ab", "0.5.1rc1", "0.5.1a2"])
+def test_bub_dev_builds_start_with_a_warning(version, logs) -> None:
+    check_bub_version(version)
+    assert any("qq.bub.prerelease" in line and version in line for line in logs)
 
 
 @pytest.mark.parametrize("version", ["0.4.2", "0.6.0", "1.0.0", "unknown"])
