@@ -238,7 +238,7 @@ Every action a chat can trigger passes one checkpoint, the **Guard**: model tool
 
 In C2C, tools are admin-only by default (`c2c_access`); replies always work.
 
-**Approval.** An admin's shell command posts a card with the full command (commands too long to show in full are refused, never truncated) and two buttons, clickable only by that group's registered admins. A tap on allow issues a one-time token bound to the session, requester, tool and exact arguments, valid for 240 seconds; the command then re-enters the Guard to use it. There is no always-allow. Model-issued commands post their result to the chat; approved comma commands run through the normal session.
+**Approval.** An admin's shell command posts a card with the full command (commands too long to show in full are refused, never truncated) and two buttons, clickable only by that group's registered admins. A tap on allow issues a one-time token bound to the session, requester, tool and exact arguments, valid for 240 seconds; the command then re-enters the Guard to use it. There is no always-allow. Once approved, model-issued calls and admins' comma commands alike are handed back to Bub as a comma command (a model call is first rewritten as the equivalent `,bash command=…`), so they run in the original session's execution environment, post their output to the chat and land on the session tape.
 
 **Shell is not sandboxed by the plugin.** Nothing in bub-qq confines what an approved command does. Run Bub in a container or similar and set `shell_sandbox=external`, or set `group_shell=deny`.
 

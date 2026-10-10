@@ -3,7 +3,10 @@
 Flow: the Guard returns ``approval`` → :func:`request_approval` posts a card
 showing the full call and remembers it → an admin taps a button →
 :func:`begin_approval_click` checks the operator is an admin → on "allow"
-:func:`complete_approval_click` issues a one-time token and runs the call.
+:func:`complete_approval_click` issues a one-time token and hands the call
+back to Bub as a comma command in the original session, so it runs in that
+session's execution environment and lands on its tape. A model tool call is
+first rewritten as the equivalent command line (:func:`call_to_command_line`).
 Running re-enters the Guard, which accepts the token only for the exact
 session, requester, tool and arguments that were shown on the card. There
 is no always-allow: every shell command is confirmed on its own.
@@ -17,8 +20,7 @@ import shlex
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from bub.channels.message import ChannelMessage
@@ -30,6 +32,7 @@ from .guard import canonical_tool
 from .guard import group_admin_member_ids
 from .guard import is_admin
 from .runtime import get_active_channel
+from .security import command_prefix
 from .security import strip_command
 from .session import BoundedDict
 
@@ -38,7 +41,6 @@ if TYPE_CHECKING:
 
 APPROVAL_TTL_SECONDS = 240.0
 PREVIEW_LIMIT = 1500
-_RESULT_LIMIT = 2000
 _MAX_PENDING = 64
 _MAX_TOKENS = 256
 
@@ -60,9 +62,7 @@ class PendingApproval:
     preview: str
     created_at: float
     requester_name: str = ""
-    workspace: str = ""
     command_line: str = ""
-    state: dict[str, Any] = field(default_factory=dict)
 
     @property
     def requester_id(self) -> str:
@@ -159,6 +159,27 @@ def comma_command_to_call(line: str) -> ToolCall:
     return ToolCall(run_id="command", tool=name, arguments=arguments)
 
 
+def call_to_command_line(tool: str, arguments: dict[str, Any]) -> str | None:
+    """The comma command Bub would run as ``tool(**arguments)``, or None.
+
+    Only scalar arguments survive Bub's ``key=value`` command parsing, so a
+    call with list or dict arguments cannot be handed back this way.
+    """
+
+    words = [canonical_tool(tool)]
+    for key, value in arguments.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif isinstance(value, str | int | float):
+            text = str(value)
+        else:
+            return None
+        words.append(f"{key}={shlex.quote(text)}")
+    return command_prefix() + " ".join(words)
+
+
 def preview_call(tool: str, arguments: dict[str, Any], command_line: str = "") -> str:
     if command_line:
         stripped = strip_command(command_line)
@@ -230,11 +251,14 @@ async def request_approval(
     config: QQConfig,
     session_id: str,
     requester_name: str = "",
-    workspace: str = "",
     command_line: str = "",
-    state: dict[str, Any] | None = None,
 ) -> str:
-    """Post an approval card; return the text the caller reports back."""
+    """Post an approval card; return the text the caller reports back.
+
+    ``command_line`` is the comma command an admin typed. Without it the
+    call came from the model and is rewritten as a command line here, so an
+    approval always runs through Bub's command path.
+    """
 
     arguments = dict(call.arguments or {})
     preview = preview_call(call.tool, arguments, command_line)
@@ -249,6 +273,13 @@ async def request_approval(
             f"Not run: the command is longer than {PREVIEW_LIMIT} characters and"
             " cannot be shown in full for approval. Split it into shorter steps."
         )
+    if not command_line:
+        command_line = call_to_command_line(call.tool, arguments) or ""
+        if not command_line:
+            return "Not run: this call has list or dict arguments and cannot be approved."
+        # The token must match the call Bub's command path will make.
+        call = comma_command_to_call(command_line)
+        arguments = dict(call.arguments)
     chat_id = (
         f"group:{requester.group_openid}"
         if requester.scope == "group"
@@ -264,9 +295,7 @@ async def request_approval(
         preview=preview,
         created_at=_clock(),
         requester_name=requester_name,
-        workspace=workspace,
         command_line=command_line,
-        state=dict(state or {}),
     )
     _pending[pending.id] = pending
     try:
@@ -365,10 +394,7 @@ async def complete_approval_click(plan: ApprovalClickPlan) -> str | None:
         return f"已拒绝 `{pending.tool}`（{pending.id}）。"
     logger.info("qq.approval.allowed id={} tool={}", pending.id, pending.tool)
     issue_token(pending)
-    if pending.command_line:
-        output = await _dispatch_approved_command(pending)
-    else:
-        output = await execute_approved_call(pending)
+    output = await _dispatch_approved_command(pending)
     header = f"已允许 `{pending.tool}`（{pending.id}）。"
     return f"{header}\n\n{output}" if output else header
 
@@ -384,81 +410,6 @@ async def _dispatch_approved_command(pending: PendingApproval) -> str:
         logger.warning("qq.approval.command_dispatch_failed id={} error={}", pending.id, exc)
         return f"执行失败: {exc}"
     return ""
-
-
-async def execute_approved_call(pending: PendingApproval) -> str:
-    """Run an approved model tool call after the Guard accepts its token."""
-
-    import bub
-
-    from .config import QQConfig
-    from .guard import evaluate
-    from .store import resolve_state_path
-
-    config = bub.ensure_config(QQConfig)
-    call = ToolCall(run_id=pending.id, tool=pending.tool, arguments=pending.arguments)
-    workspace = Path(pending.workspace or Path.cwd())
-    decision = evaluate(
-        call,
-        pending.requester,
-        config=config,
-        workspace=workspace,
-        protected=(resolve_state_path(config),),
-        approved=consume_token(pending.session_id, pending.requester, call),
-    )
-    if not decision.allowed:
-        logger.warning(
-            "qq.approval.guard_denied id={} tool={} reason={}",
-            pending.id,
-            pending.tool,
-            decision.reason,
-        )
-        return f"未执行: {decision.reason}"
-    try:
-        from bub.builtin.tools import resolve_tool_name
-        from bub.tape import AsyncTapeStoreAdapter
-        from bub.tape import InMemoryTapeStore
-        from bub.tape import Tape
-        from bub.tape import TapeContext
-        from bub.tools import REGISTRY
-        from bub.tools import ToolContext
-        from bub.tools import ToolExecutor
-
-        resolved = resolve_tool_name(pending.tool) or pending.tool
-        tool_obj = REGISTRY.get(resolved)
-        if tool_obj is None:
-            return f"找不到工具 `{pending.tool}`。"
-        state = dict(pending.state)
-        state["_runtime_workspace"] = str(workspace)
-        state["session_id"] = pending.session_id
-        store = AsyncTapeStoreAdapter(InMemoryTapeStore())
-        tape = Tape(workspace, store, TapeContext(state=state), _name=pending.session_id)
-        context = ToolContext(tape=tape, run_id=pending.id, state=state)
-        # The Guard already ran on this exact call above; hooks would only
-        # re-open the approval flow for it.
-        execution = await ToolExecutor(hooks=None).execute_async(
-            [(tool_obj, pending.arguments)], context=context
-        )
-    except Exception as exc:
-        logger.warning("qq.approval.execute_failed id={} error={}", pending.id, exc)
-        return f"执行失败: {exc}"
-    if execution.error is not None:
-        return f"执行失败: {execution.error}"
-    text = _stringify_result(execution.tool_results[0] if execution.tool_results else "")
-    if len(text) > _RESULT_LIMIT:
-        return text[:_RESULT_LIMIT] + "…"
-    return text or "(no output)"
-
-
-def _stringify_result(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False, default=str)
-    except TypeError:
-        return str(value)
 
 
 async def send_notice(session_id: str, chat_id: str, text: str) -> None:

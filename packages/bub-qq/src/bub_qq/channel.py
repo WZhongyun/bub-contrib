@@ -355,7 +355,6 @@ class QQChannel(Channel):
                 config=self._config,
                 session_id=message.session_id,
                 requester_name=str(qq_context.get("sender_name") or "").strip(),
-                workspace=str(self._workspace),
                 command_line=message.content,
             )
             if reply.startswith("Not run"):

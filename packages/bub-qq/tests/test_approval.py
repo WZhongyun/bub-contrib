@@ -14,6 +14,7 @@ from bub_qq import plugin
 from bub_qq.approval import PREVIEW_LIMIT
 from bub_qq.approval import begin_approval_click
 from bub_qq.approval import build_approval_keyboard
+from bub_qq.approval import comma_command_to_call
 from bub_qq.approval import complete_approval_click
 from bub_qq.approval import consume_token
 from bub_qq.approval import issue_token
@@ -35,10 +36,14 @@ class FakeChannel:
 
     def __init__(self) -> None:
         self.messages: list[ChannelMessage] = []
+        self.dispatched: list[approval.PendingApproval] = []
 
     async def send_for_result(self, message: ChannelMessage) -> dict[str, object]:
         self.messages.append(message)
         return {"id": "sent"}
+
+    async def dispatch_approved_command(self, pending: approval.PendingApproval) -> None:
+        self.dispatched.append(pending)
 
 
 def _config(**overrides: object) -> QQConfig:
@@ -217,41 +222,35 @@ def test_over_long_command_is_refused_not_truncated(config, tmp_path) -> None:
 # --- clicks ------------------------------------------------------------------
 
 
-class RecordingExecutor:
-    calls: list[tuple[str, dict]] = []
-
-    def __init__(self, hooks=None) -> None:
-        del hooks
-
-    async def execute_async(self, tool_calls, *, context):
-        for tool, arguments in tool_calls:
-            RecordingExecutor.calls.append((tool.name, dict(arguments)))
-
-        class _Execution:
-            error = None
-            tool_results = ["ran"]
-
-        return _Execution()
-
-
-@pytest.fixture
-def executor(monkeypatch):
-    RecordingExecutor.calls = []
-    monkeypatch.setattr("bub.tools.ToolExecutor", RecordingExecutor)
-    return RecordingExecutor
-
-
-def _request_admin_shell(tmp_path, command="uname -a"):
-    set_active_channel(FakeChannel())
+def _request_admin_shell(tmp_path, command="uname -a") -> tuple[FakeChannel, approval.PendingApproval]:
+    channel = FakeChannel()
+    set_active_channel(channel)
     _hook(
         ToolCall(run_id="r", tool="bash", arguments={"command": command}),
         _state(ADMIN, tmp_path),
     )
-    return _only_pending()
+    return channel, _only_pending()
 
 
-def test_non_admin_click_is_rejected_and_keeps_request(config, tmp_path, executor) -> None:
-    pending = _request_admin_shell(tmp_path)
+def test_model_call_is_approved_as_its_command_line(config, tmp_path) -> None:
+    _, pending = _request_admin_shell(tmp_path, "ls -la && echo `whoami`")
+    assert pending.command_line == ",bash command='ls -la && echo `whoami`'"
+    # The card shows the command itself, and the token matches the call
+    # Bub's command path makes from that line.
+    assert pending.preview == "ls -la && echo `whoami`"
+    assert comma_command_to_call(pending.command_line).arguments == pending.arguments
+
+
+def test_model_call_command_line_keeps_scalar_arguments(config) -> None:
+    line = approval.call_to_command_line(
+        "bash", {"command": "sleep 5", "timeout_seconds": 30, "background": True, "cwd": None}
+    )
+    assert line == ",bash command='sleep 5' timeout_seconds=30 background=true"
+    assert approval.call_to_command_line("bash", {"command": ["ls"]}) is None
+
+
+def test_non_admin_click_is_rejected_and_keeps_request(config, tmp_path) -> None:
+    channel, pending = _request_admin_shell(tmp_path)
     owner = Requester(scope="group", sender_id="owner-m", group_openid="group-1")
 
     plan = begin_approval_click(
@@ -260,12 +259,12 @@ def test_non_admin_click_is_rejected_and_keeps_request(config, tmp_path, executo
 
     assert plan.ack_code == approval.ACK_NO_PERMISSION
     assert asyncio.run(complete_approval_click(plan)) is None
-    assert executor.calls == []
+    assert channel.dispatched == []
     assert pending.id in approval._pending
 
 
-def test_admin_allow_runs_exactly_the_shown_call(config, tmp_path, executor) -> None:
-    pending = _request_admin_shell(tmp_path, "uname -a")
+def test_admin_allow_hands_the_call_back_to_bub(config, tmp_path) -> None:
+    channel, pending = _request_admin_shell(tmp_path, "uname -a")
 
     plan = begin_approval_click(
         approval_id=pending.id, decision="allow", operator=ADMIN, config=config
@@ -273,11 +272,8 @@ def test_admin_allow_runs_exactly_the_shown_call(config, tmp_path, executor) -> 
     notice = asyncio.run(complete_approval_click(plan))
 
     assert plan.ack_code == approval.ACK_OK
-    assert executor.calls == [("bash", {"command": "uname -a"})]
-    assert notice is not None and "已允许" in notice and "ran" in notice
-    # The token was spent by that execution.
-    call = ToolCall(run_id="r", tool="bash", arguments={"command": "uname -a"})
-    assert not consume_token(SESSION, ADMIN, call)
+    assert [p.command_line for p in channel.dispatched] == [",bash command='uname -a'"]
+    assert notice is not None and "已允许" in notice
     # A second tap finds nothing to approve.
     again = begin_approval_click(
         approval_id=pending.id, decision="allow", operator=ADMIN, config=config
@@ -285,18 +281,18 @@ def test_admin_allow_runs_exactly_the_shown_call(config, tmp_path, executor) -> 
     assert again.ack_code == approval.ACK_FAILED
 
 
-def test_deny_does_not_execute(config, tmp_path, executor) -> None:
-    pending = _request_admin_shell(tmp_path)
+def test_deny_does_not_execute(config, tmp_path) -> None:
+    channel, pending = _request_admin_shell(tmp_path)
     plan = begin_approval_click(
         approval_id=pending.id, decision="deny", operator=ADMIN, config=config
     )
     notice = asyncio.run(complete_approval_click(plan))
     assert "已拒绝" in notice
-    assert executor.calls == []
+    assert channel.dispatched == []
 
 
-def test_expired_request_cannot_be_approved(config, tmp_path, executor, monkeypatch) -> None:
-    pending = _request_admin_shell(tmp_path)
+def test_expired_request_cannot_be_approved(config, tmp_path, monkeypatch) -> None:
+    channel, pending = _request_admin_shell(tmp_path)
     monkeypatch.setattr(
         approval, "_clock", lambda: pending.created_at + approval.APPROVAL_TTL_SECONDS + 1
     )
@@ -305,23 +301,7 @@ def test_expired_request_cannot_be_approved(config, tmp_path, executor, monkeypa
     )
     assert plan.ack_code == approval.ACK_FAILED
     assert plan.notice == "审批已过期。"
-    assert executor.calls == []
-
-
-def test_execution_rechecks_guard(tmp_path, executor, monkeypatch) -> None:
-    current = {"config": _config()}
-    monkeypatch.setattr(bub, "ensure_config", lambda cls: current["config"])
-    pending = _request_admin_shell(tmp_path)
-    # The deployer turned shell off before the admin tapped allow.
-    current["config"] = _config(group_shell="deny")
-
-    plan = begin_approval_click(
-        approval_id=pending.id, decision="allow", operator=ADMIN, config=current["config"]
-    )
-    notice = asyncio.run(complete_approval_click(plan))
-
-    assert executor.calls == []
-    assert "未执行" in notice
+    assert channel.dispatched == []
 
 
 # --- comma commands through the real channel ---------------------------------
@@ -490,3 +470,50 @@ def test_admin_web_fetch_command_uses_the_guarded_fetcher(channel_env) -> None:
     # Not handed to Bub (whose web.fetch follows redirects anywhere).
     assert received == []
     assert "web.fetch refused" in sent[-1].content
+
+
+def _model_bash_in_group(channel, command: str) -> approval.PendingApproval:
+    state = {
+        QQ_STATE_KEY: {
+            "scope": "group",
+            "sender_id": "admin-m",
+            "sender_name": "Alice",
+            "group_openid": "group-1",
+            "session_id": "qq:group:group-1",
+        },
+        "session_id": "qq:group:group-1",
+        "_runtime_workspace": str(channel._workspace),
+    }
+    asyncio.run(
+        plugin.before_tool_call(
+            ToolCall(run_id="r", tool="bash", arguments={"command": command}), state
+        )
+    )
+    return _only_pending()
+
+
+def test_approved_model_call_runs_as_a_session_command(channel_env) -> None:
+    channel, received, _ = channel_env
+    pending = _model_bash_in_group(channel, "df -h")
+
+    asyncio.run(channel._handle_transport_payload(_click(pending.id, "admin-m")))
+
+    assert channel._openapi.acks[-1]["code"] == approval.ACK_OK
+    assert [(m.content, m.kind, m.session_id) for m in received] == [
+        (",bash command='df -h'", "command", "qq:group:group-1")
+    ]
+    # Replaying it needs a fresh approval.
+    asyncio.run(channel.dispatch_approved_command(pending))
+    assert len(received) == 1
+
+
+def test_approved_model_call_rechecks_the_guard(channel_env, monkeypatch) -> None:
+    channel, received, sent = channel_env
+    pending = _model_bash_in_group(channel, "df -h")
+    # The deployer turned shell off before the admin tapped allow.
+    monkeypatch.setattr(channel._config, "group_shell", "deny")
+
+    asyncio.run(channel._handle_transport_payload(_click(pending.id, "admin-m")))
+
+    assert received == []
+    assert any("命令未执行" in m.content for m in sent)

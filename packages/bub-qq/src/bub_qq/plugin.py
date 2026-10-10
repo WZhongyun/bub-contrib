@@ -250,19 +250,14 @@ async def _check_tool_call(
         protected=(resolve_state_path(config),),
     )
     if decision.action == "approval":
-        # The approval flow runs the call itself once an admin allows it.
+        # Once an admin allows it, the call runs as a comma command in this
+        # session; the model gets the pending notice now.
         message = await request_approval(
             call,
             requester,
             config=config,
             session_id=session_id,
             requester_name=str(qq_state.get("sender_name") or "").strip(),
-            workspace=str(workspace),
-            state={
-                key: value
-                for key, value in state.items()
-                if key in {QQ_STATE_KEY, "_runtime_workspace", "session_id"}
-            },
         )
         return ToolCallDecision.replace(message)
     if decision.allowed and decision.resource == "fetch":
