@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import time
 import uuid
@@ -247,15 +248,41 @@ def call_to_command_line(tool: str, arguments: dict[str, Any]) -> str | None:
 
 
 def preview_call(tool: str, arguments: dict[str, Any], command_line: str = "") -> str:
+    """The call as an admin should read it on the card: the command first.
+
+    Other scalar arguments follow on a comment line, so a shell command never
+    hides inside JSON. Anything else is shown as JSON.
+    """
+
     if command_line:
         stripped = strip_command(command_line)
         return command_line.strip() if stripped is None else stripped
-    if set(arguments) <= {"command", "cwd"} and "command" in arguments:
-        text = str(arguments.get("command") or "")
-        if arguments.get("cwd"):
-            text = f"(cwd={arguments['cwd']}) {text}"
-        return text
+    command = arguments.get("command")
+    others = {key: value for key, value in arguments.items() if key != "command" and value is not None}
+    if isinstance(command, str) and all(isinstance(v, str | int | float | bool) for v in others.values()):
+        if not others:
+            return command
+        notes = " ".join(f"{key}={value}" for key, value in others.items())
+        return f"{command}\n# {notes}"
     return json.dumps(arguments, ensure_ascii=False, default=str, indent=2)
+
+
+# Shell patterns worth a second look before approving. A hint for the human
+# on the card, not a filter: approval stays the decision.
+_RISKY_COMMANDS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\brm\s+(?:-\S*\s+)*-\S*[rRf]"), "递归或强制删除（rm -r / -f）"),
+    (re.compile(r"\bfind\b[^\n]*\s-delete\b"), "批量删除（find -delete）"),
+    (re.compile(r"\bmkfs\b|\bdd\b[^\n]*\bof="), "格式化或覆盖磁盘"),
+    (re.compile(r"\b(?:chmod|chown)\s+-\S*R"), "递归修改权限或属主"),
+    (re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b"), "下载并直接执行脚本"),
+    (re.compile(r"\bgit\s+(?:push\b[^\n]*--force|reset\s+--hard|clean\s+-\S*f)"), "不可撤销的 git 操作"),
+    (re.compile(r"\b(?:shutdown|reboot|halt|poweroff)\b"), "关机或重启"),
+    (re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "fork 炸弹"),
+)
+
+
+def risky_command_reasons(preview: str) -> list[str]:
+    return [reason for pattern, reason in _RISKY_COMMANDS if pattern.search(preview)]
 
 
 def _fenced(text: str) -> str:
@@ -397,8 +424,15 @@ async def _send_approval_message(pending: PendingApproval, config: QQConfig) -> 
         else None
     )
     minutes = int(APPROVAL_TTL_SECONDS // 60)
+    reasons = risky_command_reasons(pending.preview)
+    warning = (
+        f"⚠️ 高危命令：{'、'.join(reasons)}。执行后无法撤销，工作区内的文件可能被删除，请确认影响范围后再批准。\n\n"
+        if reasons
+        else ""
+    )
     body = (
         "## 命令执行审批\n\n"
+        f"{warning}"
         f"- 工具: `{pending.tool}`\n"
         f"- 请求人: {pending.requester_name or pending.requester_id}\n"
         f"- 有效期: {minutes} 分钟，仅管理员可批准\n\n"

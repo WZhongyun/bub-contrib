@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 from typing import Any
 
@@ -372,13 +373,17 @@ def save_state(session_id: str, state: TurnState, message: Any, model_output: st
     qq_state = _qq_state(state)
     if qq_state is None or not qq_state.get("approval_id"):
         return
+    # Bub calls save_state in a finally block: a failed command (non-zero
+    # exit raises in Bub's bash) is the exception in flight, and the output
+    # is in its message, while model_output is empty.
+    error = sys.exc_info()[1]
     record_outcome(
         session_id,
         ApprovalOutcome(
             id=str(qq_state["approval_id"]),
             command=str(qq_state.get("approval_preview") or ""),
-            status="ran",
-            output=model_output or "(no output)",
+            status="failed" if error is not None else "ran",
+            output=str(error) if error is not None else (model_output or "(no output)"),
         ),
     )
 
