@@ -254,7 +254,7 @@ qq.admin.unclaimed no admins configured; send ',qq.claim K7QX2M9PHT' to the bot 
 
 同一发送者连续输错 5 次会被锁定 10 分钟。认领和管理命令由插件直接处理，不会进入模型上下文和对话记录。也可以跳过配对，直接把身份写进 `admin_users`。
 
-另外还有：白名单（`allow_users` / `allow_groups`）在进入模型之前就丢弃名单外的消息；`llm_rate_limit_per_minute` 限制每个发送者的 LLM 调用频率；`qq.audit.llm` / `qq.audit.tool` 日志记录每一次调用。
+另外还有：白名单（`allow_users` / `allow_groups`）在进入模型之前就丢弃名单外的消息；`llm_rate_limit_per_minute` 限制每个发送者的 LLM 调用频率；`qq.audit.llm` / `qq.audit.tool` 日志记录每一次调用（`qq.audit.llm` 的 `requested_model` 是请求的模型；配置了 `fallback_models` 时实际回答的模型请看 trace 中的 `chat` span）。
 
 ### 运维逗号命令
 

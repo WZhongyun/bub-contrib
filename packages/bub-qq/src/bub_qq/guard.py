@@ -159,6 +159,9 @@ class Decision:
     action: Action
     resource: Resource
     reason: str = ""
+    # A denial the caller can fix by changing the call (a path outside the
+    # workspace); every other denial is a permission rule that holds.
+    fixable: bool = False
 
     @property
     def allowed(self) -> bool:
@@ -257,6 +260,7 @@ def evaluate(
                     "deny",
                     resource,
                     f"path '{raw}' is outside the workspace ({workspace}).",
+                    fixable=True,
                 )
         return Decision("allow", resource)
 

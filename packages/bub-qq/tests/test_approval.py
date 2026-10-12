@@ -517,3 +517,45 @@ def test_approved_model_call_rechecks_the_guard(channel_env, monkeypatch) -> Non
 
     assert received == []
     assert any("命令未执行" in m.content for m in sent)
+
+
+# --- what the model is told -------------------------------------------------
+
+
+def test_permission_denial_tells_the_model_not_to_retry(config, tmp_path) -> None:
+    set_active_channel(FakeChannel())
+    decision = _hook(
+        ToolCall(run_id="r", tool="bash", arguments={"command": "id"}),
+        _state(MEMBER, tmp_path, role="owner"),
+    )
+    assert decision is not None and decision.action == "deny"
+    assert decision.message.startswith("Shell commands are admin-only.")
+    assert "do not retry" in decision.message
+
+
+def test_fixable_denial_leaves_retrying_open(config, tmp_path) -> None:
+    decision = _hook(
+        ToolCall(run_id="r", tool="fs.read", arguments={"path": "/etc/hosts"}),
+        _state(ADMIN, tmp_path),
+    )
+    assert decision is not None and decision.action == "deny"
+    assert "outside the workspace" in decision.message
+    assert "do not retry" not in decision.message
+
+
+def test_llm_audit_names_the_requested_model(config, tmp_path) -> None:
+    from bub.hooks.interception import LlmCallRequest, LlmCallResult
+    from loguru import logger
+
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="INFO")
+    try:
+        plugin.after_llm_call(
+            LlmCallRequest(run_id="r", model="primary/model", messages=[]),
+            LlmCallResult(run_id="r", text="hi", duration_ms=5),
+            _state(ADMIN, tmp_path),
+        )
+    finally:
+        logger.remove(sink)
+    audit = [line for line in lines if "qq.audit.llm" in line]
+    assert audit and "requested_model=primary/model" in audit[0]

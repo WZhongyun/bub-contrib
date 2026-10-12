@@ -24,6 +24,7 @@ from .security import SlidingWindowRateLimiter
 from .session import BoundedDict
 from .approval import request_approval
 from .approval import send_notice
+from .guard import Decision
 from .guard import Requester
 from .guard import classify
 from .guard import evaluate
@@ -272,7 +273,25 @@ async def _check_tool_call(
         requester.identity,
         decision.reason,
     )
-    return ToolCallDecision.deny(decision.reason)
+    return ToolCallDecision.deny(_model_facing_denial(decision))
+
+
+_PERMISSION_GUIDANCE = (
+    " This is a permission rule for this chat, not a temporary error: do not"
+    " retry this call or work around it with other tools. Tell the user it was"
+    " refused and why; an admin has to run or approve it."
+)
+
+
+def _model_facing_denial(decision: Decision) -> str:
+    """The denial text for the model, telling it whether retrying can help.
+
+    Without this the model tends to retry a refused shell call over and over.
+    """
+
+    if decision.fixable:
+        return decision.reason
+    return decision.reason + _PERMISSION_GUIDANCE
 
 
 async def _guarded_web_fetch(call: ToolCall) -> ToolCallDecision:
@@ -293,7 +312,9 @@ def after_llm_call(
     if qq_state is None:
         return
     logger.info(
-        "qq.audit.llm session_id={} sender_id={} model={} duration_ms={} error={}",
+        # Bub's hook only reports the requested model; with fallback_models the
+        # answering one can differ (see the trace's chat span).
+        "qq.audit.llm session_id={} sender_id={} requested_model={} duration_ms={} error={}",
         qq_state.get("session_id"),
         qq_state.get("sender_id"),
         request.model,

@@ -254,7 +254,7 @@ qq.admin.unclaimed no admins configured; send ',qq.claim K7QX2M9PHT' to the bot 
 
 Five wrong codes lock that sender out for 10 minutes. Claim and admin commands are handled by the plugin and never reach the model or the tape. You can skip pairing by writing identities into `admin_users`.
 
-Also in place: allowlists (`allow_users` / `allow_groups`) drop other chats before the model; `llm_rate_limit_per_minute` caps LLM calls per sender; `qq.audit.llm` / `qq.audit.tool` log lines record every call.
+Also in place: allowlists (`allow_users` / `allow_groups`) drop other chats before the model; `llm_rate_limit_per_minute` caps LLM calls per sender; `qq.audit.llm` / `qq.audit.tool` log lines record every call (`requested_model` in `qq.audit.llm` is the model asked for; with `fallback_models`, the trace's `chat` span shows the one that answered).
 
 ### Ops comma commands
 
