@@ -835,3 +835,51 @@ def test_failed_command_is_reported_as_failed_with_its_output(config, tmp_path) 
     (outcome,) = approval._outcomes.pop(SESSION)
     assert outcome.status == "failed"
     assert "exited with code 1" in outcome.output
+
+
+# --- QQ session turns without a QQ sender ------------------------------------
+
+
+def _unattributed(session_id: str, workspace: Path) -> dict:
+    # What a scheduled job's turn looks like: Bub's session id, no QQ metadata.
+    return {"session_id": session_id, "_runtime_workspace": str(workspace)}
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "allowed"),
+    [
+        ("bash", {"command": "id"}, False),
+        ("fs.write", {"path": "notes.md", "content": "x"}, False),
+        ("tape.reset", {}, False),
+        ("some_plugin.tool", {}, False),
+        ("tape.info", {}, True),
+        ("qq.send", {"content": "hi"}, True),
+    ],
+)
+def test_group_turn_without_sender_acts_as_unknown_member(config, tmp_path, tool, arguments, allowed) -> None:
+    set_active_channel(FakeChannel())
+    decision = _hook(ToolCall(run_id="r", tool=tool, arguments=arguments), _unattributed(SESSION, tmp_path))
+    if allowed:
+        assert decision is None
+    else:
+        assert decision is not None and decision.action == "deny"
+    assert not approval._pending
+
+
+def test_private_turn_without_sender_does_not_inherit_the_users_rights(config, tmp_path, monkeypatch) -> None:
+    # The session id names an admin, but nothing says the admin started this turn.
+    monkeypatch.setattr(
+        bub, "ensure_config", lambda cls: _config(admin_users="c2c:u-admin,group:group-1:admin-m")
+    )
+    decision = _hook(
+        ToolCall(run_id="r", tool="tape.info", arguments={}),
+        _unattributed("qq:c2c:u-admin", tmp_path),
+    )
+    assert decision is not None and decision.action == "deny"
+
+
+def test_other_channels_are_left_alone(config, tmp_path) -> None:
+    assert _hook(ToolCall(run_id="r", tool="bash", arguments={"command": "id"}),
+                 _unattributed("cli:default", tmp_path)) is None
+    assert _hook(ToolCall(run_id="r", tool="bash", arguments={"command": "id"}),
+                 _unattributed("qqx:group:g", tmp_path)) is None

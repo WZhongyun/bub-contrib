@@ -262,7 +262,15 @@ async def before_tool_call(
 ) -> ToolCallDecision | None:
     qq_state = _qq_state(state)
     if qq_state is None:
-        return None
+        qq_state = _unattributed_qq_state(state)
+        if qq_state is None:
+            return None
+        logger.warning(
+            "qq.security.unattributed_turn tool={} session_id={} reason=no QQ sender;"
+            " checking as an unknown member",
+            call.tool,
+            qq_state["session_id"],
+        )
     try:
         return await _check_tool_call(call, state, qq_state)
     except Exception:
@@ -276,6 +284,27 @@ async def before_tool_call(
         return ToolCallDecision.deny(
             "The QQ permission check failed, so this call was blocked."
         )
+
+
+def _unattributed_qq_state(state: TurnState) -> dict[str, Any] | None:
+    """Guard state for a QQ session turn that carries no QQ sender.
+
+    Turns started inside Bub (a scheduled job, another plugin) reach a QQ
+    session without the inbound QQ metadata. They are still QQ chats, so
+    the Guard checks them as an unknown member: no sender id, hence never an
+    admin, even in a private chat whose session id names the user.
+    """
+
+    if not isinstance(state, dict):
+        return None
+    session_id = str(state.get("session_id") or "")
+    parts = session_id.split(":", 2)
+    if len(parts) < 3 or parts[0] != CHANNEL_NAME:
+        return None
+    scope, chat = parts[1], parts[2]
+    if scope == "group":
+        return {"scope": "group", "group_openid": chat, "sender_id": "", "session_id": session_id}
+    return {"scope": "c2c", "sender_id": "", "session_id": session_id}
 
 
 async def _check_tool_call(
