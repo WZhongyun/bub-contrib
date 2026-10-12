@@ -285,11 +285,18 @@ def risky_command_reasons(preview: str) -> list[str]:
     return [reason for pattern, reason in _RISKY_COMMANDS if pattern.search(preview)]
 
 
-def _fenced(text: str) -> str:
+def _fenced(text: str, language: str = "") -> str:
     fence = "```"
     while fence in text:
         fence += "`"
-    return f"{fence}\n{text}\n{fence}"
+    return f"{fence}{language}\n{text}\n{fence}"
+
+
+def _preview_language(pending: PendingApproval) -> str:
+    # QQ labels an unmarked block "text"; name it so admins see what they read.
+    if pending.tool == "bash":
+        return "bash"
+    return "json" if pending.preview.lstrip().startswith("{") else ""
 
 
 def build_approval_keyboard(
@@ -436,7 +443,7 @@ async def _send_approval_message(pending: PendingApproval, config: QQConfig) -> 
         f"- 工具: `{pending.tool}`\n"
         f"- 请求人: {pending.requester_name or pending.requester_id}\n"
         f"- 有效期: {minutes} 分钟，仅管理员可批准\n\n"
-        f"{_fenced(pending.preview)}"
+        f"{_fenced(pending.preview, _preview_language(pending))}"
     )
     result = await channel.send_for_result(
         ChannelMessage(

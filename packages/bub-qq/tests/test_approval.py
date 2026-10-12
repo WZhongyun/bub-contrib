@@ -188,7 +188,7 @@ def test_admin_shell_posts_full_command_card(config, tmp_path) -> None:
     card = channel.messages[0]
     assert card.chat_id == "group:group-1"
     assert command in card.content
-    assert "```\n" + command + "\n```" in card.content
+    assert "```bash\n" + command + "\n```" in card.content
     keyboard = card.context["_qq_outbound"]["keyboard"]
     permission = keyboard["content"]["rows"][0]["buttons"][0]["action"]["permission"]
     assert permission == {"type": 0, "specify_user_ids": ["admin-m"]}
@@ -800,7 +800,7 @@ def test_card_shows_the_command_not_json(config, tmp_path) -> None:
     assert pending.command_line == ",bash command='rm -rf /*' timeout_seconds=120"
     card = channel.messages[0].content
     assert "⚠️ 高危命令" in card and "rm -r" in card
-    assert "```\nrm -rf /*\n# timeout_seconds=120\n```" in card
+    assert "```bash\nrm -rf /*\n# timeout_seconds=120\n```" in card
 
 
 @pytest.mark.parametrize(
