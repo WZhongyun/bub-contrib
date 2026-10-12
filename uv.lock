@@ -371,8 +371,8 @@ wheels = [
 
 [[package]]
 name = "bub"
-version = "0.5.1.dev11+gb4a61bf13"
-source = { git = "https://github.com/bubbuild/bub.git#b4a61bf1326729a024161d22ba20019b8500f907" }
+version = "0.5.1"
+source = { git = "https://github.com/bubbuild/bub.git#06aadff98d3f803046e811ebe95a731acbd5adfa" }
 dependencies = [
     { name = "aiohttp" },
     { name = "any-llm-sdk" },
@@ -682,16 +682,18 @@ requires-dist = [
 
 [[package]]
 name = "bub-env"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/bub-env" }
 dependencies = [
     { name = "bub" },
+    { name = "loguru" },
     { name = "pydantic-settings" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "bub", git = "https://github.com/bubbuild/bub.git" },
+    { name = "loguru" },
     { name = "pydantic-settings", specifier = ">=2.10.1" },
 ]
 

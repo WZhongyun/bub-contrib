@@ -23,7 +23,7 @@ English documentation: [README.md](./README.md)
 
 ## 前置条件
 
-1. [安装 Bub](https://bub.build/zh-cn/docs/getting-started/install/) 0.5.x（推荐：`uv tool install bub`）。bub-qq 只支持 `bub>=0.5.0,<0.6`，版本不符时拒绝启动
+1. [安装 Bub](https://bub.build/zh-cn/docs/getting-started/install/) 0.5.1 或更新版本（推荐：`uv tool install bub`）。在更旧的 Bub 上插件不会加载，日志会说明原因。更新的小版本和开发版可以加载，但会输出 `qq.bub.untested` / `qq.bub.prerelease` 告警：新版 Bub 增加的工具在 bub-qq 识别之前只对管理员开放
 2. 执行 `bub onboard`，确认模型可用（`bub chat` 或 `bub run`）
 3. 在 [QQ 开放平台 / 机器人文档](https://bot.q.qq.com/wiki/develop/api-v2/) 创建机器人，获取 `APPID`、`SECRET`
 
@@ -258,7 +258,7 @@ qq.admin.unclaimed no admins configured; send ',qq.claim K7QX2M9PHT' to the bot 
 
 ### 运维逗号命令
 
-命令前缀跟随 Bub 的 `BUB_COMMAND_PREFIX`（默认 `,`，下文以 `,` 为例）。逗号命令只接受管理员发送；其他人的 `,` 消息作为普通文本交给模型。每条命令都按 Bub 实际执行的方式由 Guard 检查。
+命令前缀跟随 Bub 的 `BUB_COMMAND_PREFIX`（默认 `,`，下文以 `,` 为例）。逗号命令只接受管理员发送；其他人的 `,` 消息作为普通文本交给模型。每条命令都按 Bub 实际执行的方式由 Guard 检查。运维命令以 `exposure="command"` 注册，不会出现在模型的工具列表中。
 
 | 命令 | 说明 |
 | --- | --- |

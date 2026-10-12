@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -162,7 +161,6 @@ class QQChannel(Channel):
     async def start(self, stop_event: asyncio.Event | None) -> None:
         if not self._config.appid or not self._config.secret:
             raise RuntimeError("qq appid/secret is empty")
-        check_bub_version(bub.__version__)
         self._check_security_config()
         self._admins.bootstrap_code()
 
@@ -611,43 +609,6 @@ class QQChannel(Channel):
                 f"qq receive_mode must be webhook or websocket, got {self._config.receive_mode!r}"
             )
         return mode
-
-
-# Bub minor releases change the internals this plugin relies on (tool
-# names and arguments, the command path, approval execution), so only the
-# minor series it was built against is accepted.
-SUPPORTED_BUB_SERIES = (0, 5)
-
-
-def check_bub_version(version: str) -> None:
-    """Refuse to start on a Bub release outside :data:`SUPPORTED_BUB_SERIES`.
-
-    Development builds of the series (``0.5.1.dev15+g…`` from Bub's main
-    branch) are allowed with a warning: they carry changes made after the
-    last release, which may break this plugin.
-    """
-
-    major, minor = SUPPORTED_BUB_SERIES
-    match = re.match(r"(\d+)\.(\d+)", version)
-    if match is None or (int(match[1]), int(match[2])) != SUPPORTED_BUB_SERIES:
-        raise RuntimeError(
-            f"bub-qq needs Bub {major}.{minor}.x, but Bub {version} is installed;"
-            f" install 'bub>={major}.{minor}.0,<{major}.{minor + 1}'"
-        )
-    release = version.split("+", 1)[0]
-    if re.fullmatch(r"\d+(\.\d+)*", release) is None:
-        logger.warning(
-            "qq.bub.prerelease bub={} is a development or pre-release build;"
-            " bub-qq is tested against Bub {}.{} releases, so if it misbehaves,"
-            " install 'bub>={}.{}.0,<{}.{}'",
-            version,
-            major,
-            minor,
-            major,
-            minor,
-            major,
-            minor + 1,
-        )
 
 
 def _override[T](value: T | None, default: T) -> T:

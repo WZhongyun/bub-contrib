@@ -23,7 +23,7 @@ Plugin entry point: `qq` → `bub_qq.plugin`. Supports **single-chat (C2C)** and
 
 ## Prerequisites
 
-1. [Install Bub](https://bub.build/docs/getting-started/install/) 0.5.x (recommended: `uv tool install bub`). bub-qq supports only `bub>=0.5.0,<0.6` and refuses to start on other versions
+1. [Install Bub](https://bub.build/docs/getting-started/install/) 0.5.1 or later (recommended: `uv tool install bub`). On an older Bub the plugin does not load and the log says why. Newer minor releases and development builds load with a `qq.bub.untested` / `qq.bub.prerelease` warning: tools a newer Bub adds stay admin-only until bub-qq knows them
 2. Run `bub onboard` and ensure model access works (`bub chat` or `bub run`)
 3. Create a QQ bot on the [QQ Open Platform](https://bot.q.qq.com/wiki/develop/api-v2/) and obtain `APPID` / `SECRET`
 
@@ -258,7 +258,7 @@ Also in place: allowlists (`allow_users` / `allow_groups`) drop other chats befo
 
 ### Ops comma commands
 
-The command prefix follows Bub's `BUB_COMMAND_PREFIX` (`,` by default and in the examples below). Comma commands are accepted only from admins; anyone else's `,` message reaches the model as plain text. Each command is checked by the Guard exactly as Bub will run it.
+The command prefix follows Bub's `BUB_COMMAND_PREFIX` (`,` by default and in the examples below). Comma commands are accepted only from admins; anyone else's `,` message reaches the model as plain text. Each command is checked by the Guard exactly as Bub will run it. Ops commands are registered with `exposure="command"`, so they never appear in the model's tool list.
 
 | Command | Description |
 | --- | --- |

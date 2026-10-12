@@ -18,6 +18,12 @@ from bub.hooks.interception import ToolCallResult
 from bub.turn import TurnState
 from loguru import logger
 
+from .bub_version import check_bub_version
+
+# Before importing modules that use newer Bub interfaces, so an old Bub
+# fails to load the plugin with the reason.
+check_bub_version(bub.__version__)
+
 from . import tools as _tools  # noqa: F401  (registers the qq.send tool)
 from .config import QQConfig
 from .security import QQ_CONTEXT_KEY
@@ -389,9 +395,7 @@ def save_state(session_id: str, state: TurnState, message: Any, model_output: st
 
 
 @hookimpl
-def after_tool_call(
-    call: ToolCall, result: ToolCallResult, state: TurnState
-) -> None:
+def after_tool_call(call: ToolCall, result: ToolCallResult, state: TurnState) -> None:
     qq_state = _qq_state(state)
     if qq_state is None:
         return
@@ -427,7 +431,8 @@ def onboard_config(current_config: dict[str, Any]) -> dict[str, Any] | None:
                 "QQ app ID",
                 default=str(config.get("appid") or ""),
             ),
-            "secret": bub_inquirer.ask_secret("QQ secret"),
+            "secret": bub_inquirer.ask_secret("QQ secret")
+            or str(config.get("secret") or ""),
             "receive_mode": bub_inquirer.ask_select(
                 "QQ receive mode",
                 choices=RECEIVE_MODES,

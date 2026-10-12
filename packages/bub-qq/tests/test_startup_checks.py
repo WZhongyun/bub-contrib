@@ -5,7 +5,7 @@ from bub import configure
 from loguru import logger
 
 from bub_qq.channel import QQChannel
-from bub_qq.channel import check_bub_version
+from bub_qq.bub_version import check_bub_version
 
 
 @pytest.fixture
@@ -81,19 +81,26 @@ def test_send_services_get_platform_limits_per_scope(make_channel) -> None:
     assert tuned._c2c_send._passive_replies_per_msg_id == 2
 
 
-@pytest.mark.parametrize("version", ["0.5.0", "0.5.9", "0.5.1+local"])
-def test_supported_bub_releases_start_quietly(version, logs) -> None:
+@pytest.mark.parametrize("version", ["0.5.1", "0.5.9", "0.5.2+local"])
+def test_tested_bub_releases_load_quietly(version, logs) -> None:
     check_bub_version(version)
-    assert not any("qq.bub.prerelease" in line for line in logs)
+    assert not any("qq.bub." in line for line in logs)
 
 
-@pytest.mark.parametrize("version", ["0.5.1.dev15+g085dcd9ab", "0.5.1rc1", "0.5.1a2"])
-def test_bub_dev_builds_start_with_a_warning(version, logs) -> None:
+@pytest.mark.parametrize("version", ["0.5.2.dev3+g085dcd9ab", "0.5.2rc1", "0.5.2a2"])
+def test_bub_dev_builds_load_with_a_warning(version, logs) -> None:
     check_bub_version(version)
     assert any("qq.bub.prerelease" in line and version in line for line in logs)
 
 
-@pytest.mark.parametrize("version", ["0.4.2", "0.6.0", "1.0.0", "unknown"])
-def test_unsupported_bub_versions_refuse_to_start(version) -> None:
-    with pytest.raises(RuntimeError, match=r"needs Bub 0\.5\.x"):
+@pytest.mark.parametrize("version", ["0.6.0", "1.0.0"])
+def test_newer_bub_series_load_with_a_warning(version, logs) -> None:
+    # Follows Bub's latest releases: newer series are not refused.
+    check_bub_version(version)
+    assert any("qq.bub.untested" in line and version in line for line in logs)
+
+
+@pytest.mark.parametrize("version", ["0.4.2", "0.5.0", "unknown"])
+def test_bub_older_than_the_minimum_is_refused(version) -> None:
+    with pytest.raises(RuntimeError, match=r"needs Bub >= 0\.5\.1"):
         check_bub_version(version)
