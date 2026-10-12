@@ -55,13 +55,35 @@ docker_env:
 | `pids_limit` | `256` | integer, at least 16 | `docker run --pids-limit` |
 | `user` | `""` | `""`, `"uid:gid"`, `none` | `""`: the host user's uid:gid. `none`: pass no `--user` (rootless Docker, Podman) |
 | `workdir` | `""` | `""` or an absolute path | Where the workspace appears in the container. `""`: the workspace's own path (recommended) |
-| `read_only` | `true` | `true`, `false` | Read-only root filesystem with a tmpfs `/tmp`. Turn off for images that must install packages at runtime |
+| `read_only` | `true` | `true`, `false` | Read-only root filesystem with a tmpfs `/tmp`. `false` makes the root filesystem writable, which alone rarely allows installing software; see [Adding tools](#adding-tools) |
 | `tmp_size` | `512m` | Docker tmpfs size, e.g. `256m`, `1g` | Size of `/tmp` when `read_only` is on |
 | `mount_skills` | `true` | `true`, `false` | Mount skill directories outside the workspace read-only at their host paths |
 | `host_workspace` | `""` | `""` or an absolute path on the Docker host | The workspace as the Docker daemon sees it, when Bub and the daemon do not share a filesystem. Skill directories are not mounted then |
 | `mount_options` | `""` | bind mount options, e.g. `z`, `Z` | Applied to every bind mount; switches to the `--volume` syntax, so mounted paths must not contain `:` |
 | `extra_run_args` | `""` | extra `docker run` arguments, split like a shell command line | e.g. `--runtime=runsc` (gVisor), `--userns=keep-id` (Podman) |
 | `docker` | `docker` | a Docker-compatible CLI on Bub's `PATH`, or its full path | The CLI the plugin calls |
+
+### Adding tools
+
+To give commands tools the default image lacks (`git`, `jq`, Python packages), build an image with them rather than installing at runtime:
+
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git jq \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir requests
+```
+
+```bash
+docker build -t my-bub-sandbox:1 .
+```
+
+```yaml
+docker_env:
+  image: my-bub-sandbox:1
+```
+
+The container stays read-only, offline and unprivileged, and the tools are there in every new container. Installing at runtime instead needs more than `read_only: false`: commands run as a non-root user with all capabilities dropped, so system directories stay unwritable and package managers fail; the default `network: none` leaves no package source; and whatever gets installed is lost when the container is removed. Loosen `read_only`, `user` and `network` together only if you accept the weaker isolation.
 
 ## Deployment notes
 

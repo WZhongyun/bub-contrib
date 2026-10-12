@@ -55,13 +55,35 @@ docker_env:
 | `pids_limit` | `256` | 整数，至少 16 | 对应 `docker run --pids-limit` |
 | `user` | `""` | `""`、`"uid:gid"`、`none` | `""`：使用宿主机当前用户的 uid:gid。`none`：不传 `--user`（rootless Docker、Podman） |
 | `workdir` | `""` | `""` 或绝对路径 | 工作区在容器里的位置。`""`：使用工作区自身的路径（推荐） |
-| `read_only` | `true` | `true`、`false` | 只读根文件系统，`/tmp` 使用 tmpfs。镜像需要在运行时安装软件时关闭 |
+| `read_only` | `true` | `true`、`false` | 只读根文件系统，`/tmp` 使用 tmpfs。设为 `false` 后根文件系统可写，但仅靠这一项通常仍无法安装软件，见[添加工具](#添加工具) |
 | `tmp_size` | `512m` | Docker tmpfs 大小，例如 `256m`、`1g` | `read_only` 开启时 `/tmp` 的大小 |
 | `mount_skills` | `true` | `true`、`false` | 以只读方式、按原路径挂载工作区之外的 skill 目录 |
 | `host_workspace` | `""` | `""` 或 Docker 宿主机上的绝对路径 | Bub 与 Docker daemon 不在同一文件系统时，填写 daemon 一侧看到的工作区路径。设置后不挂载 skill 目录 |
 | `mount_options` | `""` | 挂载选项，例如 `z`、`Z` | 应用到所有绑定挂载；会改用 `--volume` 语法，因此挂载路径中不能含有 `:` |
 | `extra_run_args` | `""` | 额外的 `docker run` 参数，按 shell 命令行规则拆分 | 例如 `--runtime=runsc`（gVisor）、`--userns=keep-id`（Podman） |
 | `docker` | `docker` | Bub 的 `PATH` 中兼容 Docker 的命令，或其完整路径 | 插件调用的命令行工具 |
+
+### 添加工具
+
+如果命令需要默认镜像里没有的工具（`git`、`jq`、Python 包等），请构建包含这些工具的镜像，而不是在运行时安装：
+
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git jq \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir requests
+```
+
+```bash
+docker build -t my-bub-sandbox:1 .
+```
+
+```yaml
+docker_env:
+  image: my-bub-sandbox:1
+```
+
+这样容器仍然保持只读、断网、非 root，而且每个新容器里都有这些工具。如果改为在运行时安装，仅设置 `read_only: false` 是不够的：命令以非 root 用户运行且去掉了全部 capabilities，系统目录依旧不可写，包管理器会失败；默认的 `network: none` 也连不上软件源；装好的东西还会随容器删除而丢失。只有在接受隔离程度降低的前提下，才同时放宽 `read_only`、`user` 和 `network`。
 
 ## 部署注意事项
 

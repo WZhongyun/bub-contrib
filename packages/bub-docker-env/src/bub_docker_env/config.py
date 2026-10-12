@@ -94,8 +94,8 @@ class DockerEnvConfig(bub.Settings):
         default=True,
         description=(
             "Run with a read-only root filesystem and a tmpfs /tmp, so only the"
-            " workspace and /tmp are writable. Turn off for images that must"
-            " install packages at runtime."
+            " workspace and /tmp are writable. To add tools, build an image with"
+            " them rather than turning this off."
         ),
     )
     tmp_size: str = Field(
