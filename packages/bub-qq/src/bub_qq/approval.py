@@ -20,8 +20,8 @@ import shlex
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from dataclasses import asdict, dataclass, replace
+from typing import TYPE_CHECKING, Any, Literal
 
 from bub.channels.message import ChannelMessage
 from bub.hooks.interception import ToolCall
@@ -50,6 +50,11 @@ ACK_NO_PERMISSION = 4
 
 _clock: Callable[[], float] = time.monotonic
 
+# Outcomes waiting to ride along on the session's next message to the model.
+_OUTCOMES_PER_MESSAGE = 3
+_OUTCOME_OUTPUT_LIMIT = 500
+_OUTCOMES_KEPT = 20
+
 
 @dataclass
 class PendingApproval:
@@ -77,7 +82,68 @@ _pending: BoundedDict[str, PendingApproval] = BoundedDict(_MAX_PENDING)
 _tokens: BoundedDict[tuple[str, str, str, str], float] = BoundedDict(_MAX_TOKENS)
 
 
+@dataclass(frozen=True)
+class ApprovalOutcome:
+    """How one approval ended, for the model to learn on its next turn.
+
+    An approved command runs through Bub's command path, whose output never
+    enters the model's context, so the model would keep thinking it pends.
+    """
+
+    id: str
+    command: str
+    status: Literal["ran", "denied", "expired", "refused", "failed"]
+    output: str = ""
+
+
+_outcomes: BoundedDict[str, list[ApprovalOutcome]] = BoundedDict(_MAX_PENDING)
+
+
+def record_outcome(session_id: str, outcome: ApprovalOutcome) -> None:
+    if len(outcome.output) > _OUTCOME_OUTPUT_LIMIT:
+        outcome = replace(outcome, output=outcome.output[:_OUTCOME_OUTPUT_LIMIT] + "…")
+    queued = _outcomes.get(session_id, [])
+    _outcomes[session_id] = [*queued, outcome][-_OUTCOMES_KEPT:]
+
+
+def _expire_pending(session_id: str) -> None:
+    now = _clock()
+    for pending in list(_pending.values()):
+        if pending.session_id == session_id and now - pending.created_at > APPROVAL_TTL_SECONDS:
+            _pending.pop(pending.id, None)
+            record_outcome(
+                session_id, ApprovalOutcome(id=pending.id, command=pending.preview, status="expired")
+            )
+
+
+def attach_approval_outcomes(message: ChannelMessage) -> ChannelMessage:
+    """Add ended approvals to a message the model will read, once.
+
+    The outcomes are appended to the user message rather than the system
+    prompt, so they do not invalidate the prompt cache and stay on the tape.
+    """
+
+    if not message.is_active:
+        return message
+    _expire_pending(message.session_id)
+    if not _outcomes.get(message.session_id):
+        return message
+    try:
+        payload = json.loads(message.content)
+    except ValueError:
+        return message
+    if not isinstance(payload, dict):
+        return message
+    queued = _outcomes.pop(message.session_id)
+    recent = queued[-_OUTCOMES_PER_MESSAGE:]
+    payload["approval_results"] = [asdict(outcome) for outcome in recent]
+    if len(queued) > len(recent):
+        payload["approval_results_omitted"] = len(queued) - len(recent)
+    return replace(message, content=json.dumps(payload, ensure_ascii=False))
+
+
 def reset_approval_state() -> None:
+    _outcomes.clear()
     _pending.clear()
     _tokens.clear()
 
@@ -375,6 +441,10 @@ def begin_approval_click(
         return ApprovalClickPlan(ack_code=ACK_FAILED, notice="这条审批不存在或已经处理过。")
     if _clock() - pending.created_at > APPROVAL_TTL_SECONDS:
         _pending.pop(approval_id, None)
+        record_outcome(
+            pending.session_id,
+            ApprovalOutcome(id=pending.id, command=pending.preview, status="expired"),
+        )
         return ApprovalClickPlan(ack_code=ACK_FAILED, notice="审批已过期。")
     if not is_admin(config, operator):
         logger.warning(
@@ -391,6 +461,10 @@ async def complete_approval_click(plan: ApprovalClickPlan) -> str | None:
         return plan.notice
     if plan.decision == "deny":
         logger.info("qq.approval.denied id={} tool={}", pending.id, pending.tool)
+        record_outcome(
+            pending.session_id,
+            ApprovalOutcome(id=pending.id, command=pending.preview, status="denied"),
+        )
         return f"已拒绝 `{pending.tool}`（{pending.id}）。"
     logger.info("qq.approval.allowed id={} tool={}", pending.id, pending.tool)
     issue_token(pending)
@@ -408,6 +482,10 @@ async def _dispatch_approved_command(pending: PendingApproval) -> str:
         await dispatch(pending)
     except Exception as exc:
         logger.warning("qq.approval.command_dispatch_failed id={} error={}", pending.id, exc)
+        record_outcome(
+            pending.session_id,
+            ApprovalOutcome(id=pending.id, command=pending.preview, status="failed", output=str(exc)),
+        )
         return f"执行失败: {exc}"
     return ""
 

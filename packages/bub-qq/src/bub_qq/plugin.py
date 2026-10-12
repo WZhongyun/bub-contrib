@@ -22,6 +22,8 @@ from .security import QQ_CONTEXT_KEY
 from .security import QQ_STATE_KEY
 from .security import SlidingWindowRateLimiter
 from .session import BoundedDict
+from .approval import ApprovalOutcome
+from .approval import record_outcome
 from .approval import request_approval
 from .approval import send_notice
 from .guard import Decision
@@ -328,6 +330,24 @@ def after_llm_call(
             qq_state.get("session_id"),
             qq_state.get("sender_id"),
         )
+
+
+@hookimpl
+def save_state(session_id: str, state: TurnState, message: Any, model_output: str) -> None:
+    """Remember what an approved command printed, for the model's next turn."""
+
+    qq_state = _qq_state(state)
+    if qq_state is None or not qq_state.get("approval_id"):
+        return
+    record_outcome(
+        session_id,
+        ApprovalOutcome(
+            id=str(qq_state["approval_id"]),
+            command=str(qq_state.get("approval_preview") or ""),
+            status="ran",
+            output=model_output or "(no output)",
+        ),
+    )
 
 
 @hookimpl

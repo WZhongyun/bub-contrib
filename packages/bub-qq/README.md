@@ -238,7 +238,7 @@ Every action a chat can trigger passes one checkpoint, the **Guard**: model tool
 
 In C2C, tools are admin-only by default (`c2c_access`); replies always work.
 
-**Approval.** An admin's shell command posts a card with the full command (commands too long to show in full are refused, never truncated) and two buttons, clickable only by that group's registered admins. A tap on allow issues a one-time token bound to the session, requester, tool and exact arguments, valid for 240 seconds; the command then re-enters the Guard to use it. There is no always-allow. Once approved, model-issued calls and admins' comma commands alike are handed back to Bub as a comma command (a model call is first rewritten as the equivalent `,bash command=…`), so they run in the original session's execution environment, post their output to the chat and land on the session tape.
+**Approval.** An admin's shell command posts a card with the full command (commands too long to show in full are refused, never truncated) and two buttons, clickable only by that group's registered admins. A tap on allow issues a one-time token bound to the session, requester, tool and exact arguments, valid for 240 seconds; the command then re-enters the Guard to use it. There is no always-allow. Once approved, model-issued calls and admins' comma commands alike are handed back to Bub as a comma command (a model call is first rewritten as the equivalent `,bash command=…`), so they run in the original session's execution environment, post their output to the chat and land on the session tape. Bub keeps command output out of the model's context, so how each approval ended (`ran` with its output, `denied`, `expired`, `refused`, `failed`) is added once to the session's next message as `approval_results` (the last 3, output cut at 500 characters).
 
 **Shell is not sandboxed by the plugin.** Nothing in bub-qq confines what an approved command does. Run Bub in a container or similar and set `shell_sandbox=external`, or set `group_shell=deny`.
 
@@ -249,10 +249,10 @@ qq.admin.unclaimed no admins configured; send ',qq.claim K7QX2M9PHT' to the bot 
 ```
 
 1. Add the bot as a friend and send `,qq.claim <code>` in C2C. A code sent in a group is burned and replaced.
-2. To act as admin in a group, send `,qq.claim group` in C2C, then post the returned group code (valid 2 minutes, single use) in that group.
+2. To act as admin in a group, send `,qq.claim group` in C2C, then post the returned group code (valid 1 minute, single use) in that group. Whoever asked for the code gets a private message when it is used, naming the identity it registered, so a code someone else replayed first can be revoked with `,qq.admins remove`.
 3. `,qq.admins` lists admins; `,qq.admins remove <identity>` removes a registered one.
 
-Five wrong codes lock that sender out for 10 minutes. Claim and admin commands are handled by the plugin and never reach the model or the tape. You can skip pairing by writing identities into `admin_users`.
+Five wrong codes lock that sender out for 10 minutes; the bot says so once and then ignores their claims until the lock ends, so nobody can make it flood the chat. Claim and admin commands are handled by the plugin and never reach the model or the tape. You can skip pairing by writing identities into `admin_users`.
 
 Also in place: allowlists (`allow_users` / `allow_groups`) drop other chats before the model; `llm_rate_limit_per_minute` caps LLM calls per sender; `qq.audit.llm` / `qq.audit.tool` log lines record every call (`requested_model` in `qq.audit.llm` is the model asked for; with `fallback_models`, the trace's `chat` span shows the one that answered).
 

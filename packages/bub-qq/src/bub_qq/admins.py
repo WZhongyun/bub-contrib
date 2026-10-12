@@ -37,7 +37,8 @@ if TYPE_CHECKING:
     from .store import QQPlatformStore
 
 BOOTSTRAP_TTL_SECONDS = 600.0
-GROUP_CODE_TTL_SECONDS = 120.0
+# Short: the code is posted in the group, where others could replay it first.
+GROUP_CODE_TTL_SECONDS = 60.0
 MAX_FAILURES = 5
 LOCKOUT_SECONDS = 600.0
 CODE_LENGTH = 10
@@ -45,6 +46,14 @@ _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I
 
 CLAIM_COMMAND = "qq.claim"
 ADMINS_COMMAND = "qq.admins"
+
+
+def is_admin_command(text: str) -> bool:
+    """Whether ``text`` is a claim/admins command, which anyone may send."""
+
+    body = strip_command(text)
+    words = body.split() if body is not None else []
+    return bool(words) and words[0] in (CLAIM_COMMAND, ADMINS_COMMAND)
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,8 @@ class AdminRegistry:
         self._codes: dict[str, _PairingCode] = {}
         self._failures: dict[str, deque[float]] = {}
         self._locked_until: dict[str, float] = {}
+        # (c2c openid, text) for admins to tell privately; the channel sends them.
+        self.notices: list[tuple[str, str]] = []
         self._publish()
 
     def _publish(self) -> None:
@@ -105,7 +116,10 @@ class AdminRegistry:
         return code
 
     def handle(self, text: str, requester: Requester) -> str | None:
-        """Reply for a claim/admins command, or None when ``text`` is not one."""
+        """Reply for a claim/admins command, or None when ``text`` is not one.
+
+        An empty reply means the command was handled and gets no answer.
+        """
 
         body = strip_command(text)
         words = body.split() if body is not None else []
@@ -128,14 +142,19 @@ class AdminRegistry:
         identity = requester.identity
         now = self._clock()
         if self._locked_until.get(identity, 0.0) > now:
-            return "尝试次数过多，请 10 分钟后再试。"
+            # Already told once; answering every attempt would let anyone
+            # make the bot flood the chat.
+            logger.info("qq.admin.claim_ignored identity={} reason=locked", identity)
+            return ""
         code = args[0].upper()
         entry = self._codes.get(code)
         if entry is None or entry.expires_at <= now:
             self._codes.pop(code, None)
-            self._record_failure(identity, now)
+            locked = self._record_failure(identity, now)
             if not self.has_admins():
                 self.bootstrap_code()  # make sure a fresh code is in the log
+            if locked:
+                return "尝试次数过多，请 10 分钟后再试。"
             return "配对码无效或已过期。"
         if entry.kind == "bootstrap" and requester.scope != "c2c":
             # The code is now visible to the whole group: burn it.
@@ -154,7 +173,24 @@ class AdminRegistry:
             issued_by=entry.issued_by,
         )
         self._publish()
-        logger.info("qq.admin.registered identity={} via={}", identity, entry.kind)
+        logger.info(
+            "qq.admin.registered identity={} via={} issued_by={}",
+            identity,
+            entry.kind,
+            entry.issued_by or "-",
+        )
+        if entry.kind == "group" and entry.issued_by.startswith("c2c:"):
+            # The code was visible in the group; let whoever asked for it
+            # check that the registration was really theirs.
+            self.notices.append(
+                (
+                    entry.issued_by.removeprefix("c2c:"),
+                    (
+                        f"你申请的群登记码已被使用：{identity} 已登记为管理员。"
+                        f"如果不是你本人，请发送 {command_prefix()}{ADMINS_COMMAND} remove {identity}"
+                    ),
+                )
+            )
         return f"已登记为管理员：{identity}"
 
     def _issue_group_code(self, requester: Requester) -> str:
@@ -172,7 +208,9 @@ class AdminRegistry:
             f"（{minutes} 分钟内有效，只能使用一次）。"
         )
 
-    def _record_failure(self, identity: str, now: float) -> None:
+    def _record_failure(self, identity: str, now: float) -> bool:
+        """Count a failed attempt; True when it locks the sender out."""
+
         window = self._failures.setdefault(identity, deque())
         while window and now - window[0] > LOCKOUT_SECONDS:
             window.popleft()
@@ -181,6 +219,8 @@ class AdminRegistry:
             self._locked_until[identity] = now + LOCKOUT_SECONDS
             window.clear()
             logger.warning("qq.admin.claim_locked identity={}", identity)
+            return True
+        return False
 
     # --- ,qq.admins --------------------------------------------------------
 

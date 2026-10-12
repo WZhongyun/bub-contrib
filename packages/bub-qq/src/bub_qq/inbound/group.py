@@ -11,6 +11,7 @@ from ..protocol.models import QQGroupMessage
 from ..protocol.models import QQMention
 from ..guard import Requester
 from ..security import QQ_CONTEXT_KEY
+from ..admins import is_admin_command
 from ..security import strip_command
 from .common import attachment_payloads
 from .common import exclude_none
@@ -98,12 +99,13 @@ def build_group_channel_message(
                 is_active=True,
                 context=context,
             )
-        logger.warning(
-            "qq.group.command_denied group_openid={} member_openid={} role={}",
-            message.group_openid,
-            message.member_openid,
-            message.member_role,
-        )
+        if not is_admin_command(text):
+            logger.warning(
+                "qq.group.command_denied group_openid={} member_openid={} role={}",
+                message.group_openid,
+                message.member_openid,
+                message.member_role,
+            )
 
     payload = {
         "message": text,

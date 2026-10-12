@@ -86,9 +86,13 @@ def test_bootstrap_code_expires(env) -> None:
 def test_failed_attempts_lock_the_sender(env) -> None:
     registry, config, _, clock = env
     code = registry.bootstrap_code()
-    for _ in range(MAX_FAILURES):
-        registry.handle(",qq.claim WRONGCODE1", STRANGER)
-    assert "尝试次数过多" in registry.handle(f",qq.claim {code}", STRANGER)
+    replies = [registry.handle(",qq.claim WRONGCODE1", STRANGER) for _ in range(MAX_FAILURES)]
+    # Told once, on the attempt that locks; then nothing, so the bot cannot
+    # be made to flood the chat. A valid code does not help while locked.
+    assert replies[:-1] == ["配对码无效或已过期。"] * (MAX_FAILURES - 1)
+    assert "尝试次数过多" in replies[-1]
+    assert registry.handle(f",qq.claim {code}", STRANGER) == ""
+    assert registry.handle(",qq.claim WRONGCODE2", STRANGER) == ""
     assert not is_admin(config, STRANGER)
     clock.now += LOCKOUT_SECONDS + 1
     code = registry.bootstrap_code()
@@ -193,3 +197,44 @@ def test_claim_never_reaches_bub(tmp_path: Path, monkeypatch) -> None:
     finally:
         configure._global_config.clear()
         configure._config_data.clear()
+
+
+
+def _group_code(registry: AdminRegistry) -> str:
+    reply = registry.handle(",qq.claim group", OWNER_C2C)
+    return reply.split("：", 1)[1].split("\n", 1)[0]
+
+
+def test_group_code_is_single_use_and_short_lived(env) -> None:
+    registry, config, _, _ = env
+    registry.handle(f",qq.claim {registry.bootstrap_code()}", OWNER_C2C)
+    assert GROUP_CODE_TTL_SECONDS == 60
+    code = _group_code(registry)
+    assert registry.handle(f",qq.claim {code}", OWNER_IN_GROUP).startswith("已登记")
+
+    # Someone copying the code from the chat afterwards gets nothing.
+    copier = Requester("group", "m-copier", "g1")
+    assert registry.handle(f",qq.claim {code}", copier) == "配对码无效或已过期。"
+    assert not is_admin(config, copier)
+    assert registry.handle(f",qq.claim {code}", OWNER_IN_GROUP) == "配对码无效或已过期。"
+
+
+def test_group_registration_notifies_the_issuer(env) -> None:
+    registry, _, _, _ = env
+    registry.handle(f",qq.claim {registry.bootstrap_code()}", OWNER_C2C)
+    registry.notices.clear()
+    code = _group_code(registry)
+    # Someone else got to the code first: the issuer must hear about it.
+    thief = Requester("group", "m-thief", "g1")
+    assert registry.handle(f",qq.claim {code}", thief).startswith("已登记")
+    assert len(registry.notices) == 1
+    openid, text = registry.notices[0]
+    assert openid == "u-owner"
+    assert "group:g1:m-thief" in text
+    assert ",qq.admins remove group:g1:m-thief" in text
+
+
+def test_bootstrap_claim_sends_no_notice(env) -> None:
+    registry, _, _, _ = env
+    registry.handle(f",qq.claim {registry.bootstrap_code()}", OWNER_C2C)
+    assert registry.notices == []

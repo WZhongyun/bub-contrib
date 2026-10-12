@@ -32,7 +32,10 @@ from .inbound.interaction import extract_claw_cfg_update
 from .admins import AdminRegistry
 from .approval import PendingApproval
 from .approval import begin_approval_click
+from .approval import ApprovalOutcome
+from .approval import attach_approval_outcomes
 from .approval import comma_command_to_call
+from .approval import record_outcome
 from .approval import complete_approval_click
 from .approval import consume_token
 from .approval import parse_approval_button
@@ -283,7 +286,7 @@ class QQChannel(Channel):
             channel_message
         ):
             return
-        await self._on_receive(channel_message)
+        await self._on_receive(attach_approval_outcomes(channel_message))
 
     async def _handle_group_message(self, payload: dict[str, Any]) -> None:
         parsed = self._group_inbound.parse_inbound(payload)
@@ -314,7 +317,7 @@ class QQChannel(Channel):
             channel_message
         ):
             return
-        await self._on_receive(channel_message)
+        await self._on_receive(attach_approval_outcomes(channel_message))
 
     @property
     def session_state(self) -> QQSessionState:
@@ -390,6 +393,9 @@ class QQChannel(Channel):
             "sender_id": pending.requester.sender_id,
             "sender_name": pending.requester_name,
             "session_id": pending.session_id,
+            # save_state records the command's output under this id.
+            "approval_id": pending.id,
+            "approval_preview": pending.preview,
         }
         if pending.requester.group_openid:
             qq_context["group_openid"] = pending.requester.group_openid
@@ -404,6 +410,11 @@ class QQChannel(Channel):
         )
         if await self._admit_command(message):
             await self._on_receive(message)
+        else:
+            record_outcome(
+                pending.session_id,
+                ApprovalOutcome(id=pending.id, command=pending.preview, status="refused"),
+            )
 
     async def _handle_interaction(self, payload: dict[str, Any]) -> None:
         event = parse_interaction_event(payload)
@@ -576,8 +587,22 @@ class QQChannel(Channel):
         reply = self._admins.handle(text, requester)
         if reply is None:
             return False
-        await send_notice(channel_message.session_id, channel_message.chat_id, reply)
+        if reply:
+            await send_notice(channel_message.session_id, channel_message.chat_id, reply)
+        await self._send_admin_notices()
         return True
+
+    async def _send_admin_notices(self) -> None:
+        """Tell admins privately about registrations made with their codes."""
+
+        while self._admins.notices:
+            openid, text = self._admins.notices.pop(0)
+            try:
+                await send_notice(f"{self.name}:c2c:{openid}", f"c2c:{openid}", text)
+            except Exception as exc:
+                # Proactive C2C messages need the user's opt-in on QQ; the
+                # registration is still in the log (qq.admin.registered).
+                logger.warning("qq.admin.notice_failed openid={} error={}", openid, exc)
 
     def _normalize_receive_mode(self) -> str:
         mode = (self._config.receive_mode or "").strip().lower()

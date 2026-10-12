@@ -9,6 +9,7 @@ from loguru import logger
 from ..protocol.models import QQC2CMessage
 from ..guard import Requester
 from ..security import QQ_CONTEXT_KEY
+from ..admins import is_admin_command
 from ..security import strip_command
 from .common import attachment_payloads
 from .common import exclude_none
@@ -74,10 +75,11 @@ def build_c2c_channel_message(
                 is_active=True,
                 context=context,
             )
-        logger.warning(
-            "qq.c2c.command_denied user_openid={} reason=not_admin_user",
-            message.user_openid,
-        )
+        if not is_admin_command(text):
+            logger.warning(
+                "qq.c2c.command_denied user_openid={} reason=not_admin_user",
+                message.user_openid,
+            )
 
     payload = {
         "message": text,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import bub
@@ -559,3 +560,145 @@ def test_llm_audit_names_the_requested_model(config, tmp_path) -> None:
         logger.remove(sink)
     audit = [line for line in lines if "qq.audit.llm" in line]
     assert audit and "requested_model=primary/model" in audit[0]
+
+
+# --- approval outcomes reach the model ---------------------------------------
+
+
+def _c2c_payload(content: str, message_id: str, sender: str = "u-admin") -> dict:
+    return {
+        "id": f"event-{message_id}",
+        "op": 0,
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "author": {"user_openid": sender},
+            "content": content,
+            "id": message_id,
+            "timestamp": "2099-01-01T00:00:00+00:00",
+        },
+    }
+
+
+def _results(message: ChannelMessage) -> list[dict]:
+    return json.loads(message.content).get("approval_results", [])
+
+
+def test_ran_command_output_rides_on_the_next_message_once(channel_env) -> None:
+    channel, received, _ = channel_env
+    pending = _model_bash_in_group(channel, "df -h")
+    asyncio.run(channel._handle_transport_payload(_click(pending.id, "admin-m")))
+    command = received[-1]
+    # Bub runs the command and calls save_state with its output.
+    state = plugin.load_state(command, command.session_id)
+    plugin.save_state(command.session_id, state, command, "Filesystem  Size\n/dev/vda  20G")
+
+    asyncio.run(channel._handle_transport_payload(_group_command("结果呢？", message_id="n1")))
+    assert _results(received[-1]) == [
+        {"id": pending.id, "command": "df -h", "status": "ran", "output": "Filesystem  Size\n/dev/vda  20G"}
+    ]
+    asyncio.run(channel._handle_transport_payload(_group_command("还有吗？", message_id="n2")))
+    assert _results(received[-1]) == []
+
+
+def test_denied_and_refused_approvals_are_reported(channel_env, monkeypatch) -> None:
+    channel, received, _ = channel_env
+    denied = _model_bash_in_group(channel, "rm -rf build")
+    asyncio.run(channel._handle_transport_payload(_click(denied.id, "admin-m", decision="deny")))
+    refused = _model_bash_in_group(channel, "df -h")
+    monkeypatch.setattr(channel._config, "group_shell", "deny")
+    asyncio.run(channel._handle_transport_payload(_click(refused.id, "admin-m")))
+
+    asyncio.run(channel._handle_transport_payload(_group_command("然后呢", message_id="n1")))
+    assert [(r["id"], r["status"]) for r in _results(received[-1])] == [
+        (denied.id, "denied"),
+        (refused.id, "refused"),
+    ]
+
+
+def test_expired_approvals_are_reported(channel_env, monkeypatch) -> None:
+    channel, received, _ = channel_env
+    pending = _model_bash_in_group(channel, "df -h")
+    monkeypatch.setattr(
+        approval, "_clock", lambda: pending.created_at + approval.APPROVAL_TTL_SECONDS + 1
+    )
+    asyncio.run(channel._handle_transport_payload(_group_command("然后呢", message_id="n1")))
+    assert [(r["id"], r["status"]) for r in _results(received[-1])] == [(pending.id, "expired")]
+    assert pending.id not in approval._pending
+
+
+def test_outcomes_are_bounded() -> None:
+    session = "qq:group:group-1"
+    for index in range(5):
+        approval.record_outcome(
+            session,
+            approval.ApprovalOutcome(id=f"a{index}", command="yes", status="ran", output="y" * 2000),
+        )
+    message = ChannelMessage(
+        session_id=session, content=json.dumps({"message": "hi"}), channel="qq",
+        chat_id="group:group-1", is_active=True,
+    )
+    payload = json.loads(approval.attach_approval_outcomes(message).content)
+    assert [r["id"] for r in payload["approval_results"]] == ["a2", "a3", "a4"]
+    assert payload["approval_results_omitted"] == 2
+    assert all(len(r["output"]) <= 501 for r in payload["approval_results"])
+
+
+def test_outcomes_wait_for_a_message_the_model_reads() -> None:
+    session = "qq:group:group-1"
+    approval.record_outcome(session, approval.ApprovalOutcome(id="a1", command="ls", status="denied"))
+    inactive = ChannelMessage(
+        session_id=session, content=json.dumps({"message": "hi"}), channel="qq",
+        chat_id="group:group-1", is_active=False,
+    )
+    assert approval.attach_approval_outcomes(inactive) is inactive
+    active = ChannelMessage(
+        session_id=session, content=json.dumps({"message": "hi"}), channel="qq",
+        chat_id="group:group-1", is_active=True,
+    )
+    assert _results(approval.attach_approval_outcomes(active)) == [
+        {"id": "a1", "command": "ls", "status": "denied", "output": ""}
+    ]
+
+
+# --- claims through the real channel ----------------------------------------
+
+
+def test_group_claim_notifies_issuer_and_logs_no_denial(channel_env) -> None:
+    from loguru import logger
+
+    channel, received, sent = channel_env
+    lines: list[str] = []
+    sink = logger.add(lambda message: lines.append(str(message)), level="INFO")
+    try:
+        asyncio.run(channel._handle_transport_payload(_c2c_payload(",qq.claim group", "c1")))
+        code = sent[-1].content.split("：", 1)[1].split("\n", 1)[0]
+        asyncio.run(
+            channel._handle_transport_payload(
+                _group_command(f",qq.claim {code}", sender="member-x", message_id="g1")
+            )
+        )
+    finally:
+        logger.remove(sink)
+    assert received == []
+    assert not any("command_denied" in line for line in lines)
+    notices = [m for m in sent if m.chat_id == "c2c:u-admin" and "group:group-1:member-x" in m.content]
+    assert len(notices) == 1
+
+
+def test_locked_claimer_gets_no_reply(channel_env) -> None:
+    channel, _, sent = channel_env
+    for index in range(approval_admins_max_failures() + 3):
+        asyncio.run(
+            channel._handle_transport_payload(
+                _group_command(",qq.claim WRONGWRONG", sender="member-x", message_id=f"w{index}")
+            )
+        )
+    replies = [m.content for m in sent if m.chat_id == "group:group-1"]
+    assert len(replies) == approval_admins_max_failures()
+    assert "尝试次数过多" in replies[-1]
+
+
+def approval_admins_max_failures() -> int:
+    from bub_qq.admins import MAX_FAILURES
+
+    return MAX_FAILURES
