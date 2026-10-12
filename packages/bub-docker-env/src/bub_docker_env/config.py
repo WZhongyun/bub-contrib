@@ -40,7 +40,10 @@ class DockerEnvConfig(bub.Settings):
     )
     image: str = Field(
         default="python:3.12-slim",
-        description="Image to run; it needs bash, setsid (util-linux) and python3.",
+        description=(
+            "Image to run; it needs bash, sh, setsid (util-linux), cat, mkdir,"
+            " dirname and ls, and python3 for run_code."
+        ),
     )
     network: str = Field(
         default="none",

@@ -1,71 +1,96 @@
 # bub-docker-env
 
-Runs Bub's `bash`, `bash.output`, `bash.kill`, `fs.*` and code-mode `run_code` tools inside Docker containers instead of on the host, through Bub's `provide_environment` hook. It requires Bub 0.5 or later; older Bub would ignore the hook and keep running commands on the host, so the package refuses to install there. Use it when people you do not fully trust can make the agent run commands, for example through a chat channel.
+Runs Bub's `bash`, `bash.output`, `bash.kill`, `fs.*` and code-mode `run_code` tools inside Docker containers instead of on the host, through Bub's `provide_environment` hook. Use it when people you do not fully trust can make the agent run commands, for example through a chat channel.
+
+Requires Bub 0.5 or later. Older Bub would ignore the hook and keep running commands on the host, so the package refuses to install there.
 
 Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 
 ## What runs where
 
-- By default **every session** runs in a container. Session ids look like `<channel>:<chat id>`, so `sessions: "qq:*"` keeps only QQ chats in Docker while your own `bub chat` / `bub run` stay on the host. The log shows `docker_env.session session_id=… container=…` for each session that gets a container.
-- The container mounts **the Bub workspace at its own path** (Bub's prompt tells the model that path, so it must exist in the container too), and skill directories outside it (`~/.agents/skills` and skills shipped by installed plugins) **read-only at their host paths**, so scripts a skill tells the model to run are found. Keep secrets (`~/.bub/config.yml`, API keys, state files) outside the workspace. Tools a skill script needs (Python packages, CLIs) must be in the image.
-- Tool semantics stay in Bub: timeouts, background shells, output rendering and hooks are unchanged. Only processes and file access move into the container.
+- **Which sessions**: every session by default. Session ids look like `<channel>:<chat id>`, so `sessions: "qq:*"` keeps only QQ chats in Docker while your own `bub chat` / `bub run` stay on the host.
+- **What moves into the container**: processes (`bash`, `run_code`) and file access (`fs.*`). Tool semantics stay in Bub: timeouts, background shells, output rendering and hooks are unchanged. Other tools (the channel's own tools, `web.fetch`, MCP tools, other plugins' tools) still run in Bub's process on the host.
+- **What the container sees**: the Bub workspace, mounted **at its own path** (Bub's prompt tells the model that path, so it must exist in the container too), and skill directories outside the workspace (`~/.agents/skills` and skills shipped by installed plugins), mounted **read-only at their host paths** so scripts a skill tells the model to run are found. Nothing else from the host. Keep secrets (`~/.bub/config.yml`, API keys, state files) outside the workspace.
+- **What it can change**: only the workspace and `/tmp`. The workspace is writable by design, so a command someone approves can still delete everything in it: keep nothing irreplaceable there.
 
 Every container starts with:
 
 | Setting | Default |
 | --- | --- |
-| network | `none` (no network at all) |
+| network | none at all |
 | user | the host user's uid:gid, so files in the workspace keep their owner |
-| capabilities | all dropped, `no-new-privileges` |
+| privileges | all capabilities dropped, `no-new-privileges` |
 | limits | 1 GB memory, 1 CPU, 256 processes |
-| root filesystem | read-only; only the workspace and a 512 MB tmpfs `/tmp` are writable |
-| image | `python:3.12-slim` (needs `bash`, `setsid` and `python3`) |
+| root filesystem | read-only; `/tmp` is a 512 MB tmpfs; `HOME` is `/tmp`, so anything written under `~` is gone when the container is removed |
+| image | `python:3.12-slim` |
 
-Containers start on a session's first command and are removed when Bub stops. If Docker is unavailable, commands fail; they never fall back to the host.
+## Lifecycle
+
+- A session's container starts on its first tool call that needs it (`bash`, `fs.*` or `run_code`). Starting takes a second or two; the image is pulled on first use.
+- Before a container is used, the plugin compares the workspace's entries with what the container sees at the workspace path, and refuses (and removes) the container when none match; see [Deployment notes](#deployment-notes).
+- Containers are removed when Bub stops. With `scope: shared`, the one container is removed when the last session using it closes, which also happens when Bub stops.
+- If Docker is unavailable, the tool call fails. Commands never fall back to the host.
+- Each process starts its own session inside the container and records its process group, so timeouts and `bash.kill` stop the whole tree, as on the host.
+
+Containers are named `bub-env-<12 hex chars>` and labelled `bub.docker-env=1` and `bub.docker-env.key=<session id, or "shared">`.
 
 ## Configuration
 
-In `~/.bub/config.yml` (or as `BUB_DOCKER_ENV_*` environment variables):
+In the `docker_env:` section of `~/.bub/config.yml`, or as environment variables `BUB_DOCKER_ENV_<KEY>` (e.g. `BUB_DOCKER_ENV_NETWORK=bridge`). Bub reads them at startup, so restart Bub after a change.
 
 ```yaml
 docker_env:
-  sessions: "*"             # comma-separated session id globs, e.g. "qq:*"
-  scope: session            # session: one container per session; shared: one for all
-  image: python:3.12-slim
-  network: none             # none, bridge, or a named Docker network
-  memory: 1g
-  cpus: "1"
-  pids_limit: 256
-  user: ""                  # uid:gid; empty uses the host user; "none" passes no --user
-  workdir: ""               # empty: the workspace's own path
-  read_only: true           # read-only root filesystem, tmpfs /tmp
-  tmp_size: 512m
-  docker: docker            # the docker CLI to call
-  mount_skills: true        # mount skill directories outside the workspace read-only
-  host_workspace: ""        # the workspace path as the Docker daemon sees it
-  mount_options: ""         # bind mount options, e.g. "z" for SELinux
-  extra_run_args: ""        # extra `docker run` arguments, e.g. "--runtime=runsc"
+  sessions: "qq:*"
+  network: none
 ```
 
-The workspace is writable by design, so a command an admin approves can still delete everything in it: keep nothing irreplaceable there.
-
-`scope: shared` is cheaper but lets sessions see each other's processes and `/tmp`. `network: bridge` lets commands reach the internet **and your local network**.
+| Key | Default | Values | What it does |
+| --- | --- | --- | --- |
+| `sessions` | `"*"` | comma-separated globs over session ids, e.g. `"qq:*"`, `"qq:*,feishu:*"`; empty matches nothing | Sessions that run in Docker. Others keep Bub's host environment |
+| `scope` | `session` | `session`, `shared` | `session`: one container per session. `shared`: one container for all matching sessions; cheaper, but sessions see each other's processes and `/tmp` |
+| `image` | `python:3.12-slim` | any image reference | Must provide `bash`, `sh`, `setsid` (util-linux), `cat`, `mkdir`, `dirname` and `ls`; `python3` is needed only for `run_code` |
+| `network` | `none` | `none`, `bridge`, or the name of a Docker network | `bridge` lets commands reach the internet **and your local network** |
+| `memory` | `1g` | Docker memory size, e.g. `512m`, `2g` | `docker run --memory` |
+| `cpus` | `"1"` | number of CPUs, e.g. `"0.5"`, `"2"` | `docker run --cpus` |
+| `pids_limit` | `256` | integer, at least 16 | `docker run --pids-limit` |
+| `user` | `""` | `""`, `"uid:gid"`, `none` | `""`: the host user's uid:gid. `none`: pass no `--user` (rootless Docker, Podman) |
+| `workdir` | `""` | `""` or an absolute path | Where the workspace appears in the container. `""`: the workspace's own path (recommended) |
+| `read_only` | `true` | `true`, `false` | Read-only root filesystem with a tmpfs `/tmp`. Turn off for images that must install packages at runtime |
+| `tmp_size` | `512m` | Docker tmpfs size, e.g. `256m`, `1g` | Size of `/tmp` when `read_only` is on |
+| `mount_skills` | `true` | `true`, `false` | Mount skill directories outside the workspace read-only at their host paths |
+| `host_workspace` | `""` | `""` or an absolute path on the Docker host | The workspace as the Docker daemon sees it, when Bub and the daemon do not share a filesystem. Skill directories are not mounted then |
+| `mount_options` | `""` | bind mount options, e.g. `z`, `Z` | Applied to every bind mount; switches to the `--volume` syntax, so mounted paths must not contain `:` |
+| `extra_run_args` | `""` | extra `docker run` arguments, split like a shell command line | e.g. `--runtime=runsc` (gVisor), `--userns=keep-id` (Podman) |
+| `docker` | `docker` | a Docker-compatible CLI on Bub's `PATH`, or its full path | The CLI the plugin calls |
 
 ## Deployment notes
 
-The Docker daemon resolves bind mounts **on its own host**, not where Bub runs. Before a container is used, the plugin compares the workspace's entries with what the container sees at `/workspace`, and refuses the container if none match, so a wrong mount fails instead of silently showing an empty or unrelated directory. An empty workspace cannot be checked; the log then shows `docker_env.mount.unverified`.
+The Docker daemon resolves bind mounts **on its own host**, not where Bub runs. When the two differ, the workspace path can silently mount an empty or unrelated directory; the mount check refuses such a container, and the error points at `host_workspace`. An empty workspace cannot be checked; the log then shows `docker_env.mount.unverified`.
 
-| Deployment | What to set |
-| --- | --- |
-| Bub on the Docker host (macOS, Linux) | nothing |
-| Bub in a container using the host's `docker.sock`, or a remote `DOCKER_HOST` | `host_workspace`: the workspace path on the Docker host. Skill directories are then not mounted |
-| SELinux (Fedora, RHEL) | `mount_options: z` |
-| Rootless Docker | `user: none` |
-| Podman | `user: none` and `extra_run_args: "--userns=keep-id"` |
-| Stronger isolation with gVisor | `extra_run_args: "--runtime=runsc"` |
-| Docker Desktop | the workspace must be under a shared path (Settings → Resources → File sharing) |
+| Deployment | What to set | Tested |
+| --- | --- | --- |
+| Bub on the Docker host | nothing | macOS with Docker Desktop |
+| Bub in a container using the host's `docker.sock`, or a remote `DOCKER_HOST` | `host_workspace`: the workspace path on the Docker host | refusal of a wrong mount only |
+| SELinux (Fedora, RHEL) | `mount_options: z` | no |
+| Rootless Docker | `user: none` | no |
+| Podman | `docker: podman`, `user: none`, `extra_run_args: "--userns=keep-id"` | no |
+| gVisor | `extra_run_args: "--runtime=runsc"` | no |
+| Docker Desktop | the workspace must be under a shared path (Settings → Resources → File sharing) | yes |
 
-This plugin needs a Docker daemon. Kubernetes clusters and hosted agent sandboxes usually do not expose one; they need an environment provider for their own API.
+Linux and macOS hosts are supported; Windows is not. Kubernetes clusters and hosted agent sandboxes usually expose no Docker daemon; they need an environment provider for their own API.
+
+## Logs
+
+| Event | Level | Meaning |
+| --- | --- | --- |
+| `docker_env.session` | INFO | A session got a Docker environment (with its container name and scope) |
+| `docker_env.session.host` | DEBUG | A session did not match `sessions` and stays on the host |
+| `docker_env.container.started` | INFO | A container started (image, network) |
+| `docker_env.container.removed` | INFO | A container was removed |
+| `docker_env.mount.unverified` | INFO | The workspace was empty, so the mount check could not compare entries |
+| `docker_env.signal_failed` | WARNING | Stopping a process in the container could not be requested |
+
+A refused mount or a container that fails to start surfaces as the tool call's error.
 
 ## Install
 
@@ -81,11 +106,11 @@ For local development, install the package path into the environment that runs `
 uv tool install bub --with /path/to/bub-contrib/packages/bub-docker-env
 ```
 
-Docker (Docker Desktop, OrbStack or Docker Engine) must be running on the host. Linux and macOS hosts are supported.
+Docker (Docker Desktop, OrbStack or Docker Engine) must be running, and the `docker` CLI must be on the `PATH` of the Bub process.
 
 ## Cleanup
 
-Containers are removed when Bub stops normally. After a crash or `kill -9` they keep running; remove them with:
+After a crash or `kill -9`, containers keep running. Remove them with:
 
 ```bash
 docker rm -f $(docker ps -q --filter label=bub.docker-env=1)
