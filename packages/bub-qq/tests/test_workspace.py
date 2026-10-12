@@ -16,14 +16,14 @@ def test_artifact_root_uses_workspace_for_dedicated_dir(tmp_path: Path) -> None:
 
 
 def test_artifact_root_falls_back_for_home_and_slash(tmp_path: Path, monkeypatch) -> None:
-    import bub
-
     home = tmp_path / "home"
     home.mkdir()
     bub_home = tmp_path / "bub-home"
     bub_home.mkdir()
     monkeypatch.setattr("bub_qq.workspace.Path.home", lambda: home)
-    monkeypatch.setattr(bub, "home", bub_home)
+    # bub.home is computed from BUB_HOME on each access; replacing the
+    # attribute would leave a fixed value behind for later tests.
+    monkeypatch.setenv("BUB_HOME", str(bub_home))
 
     assert is_unsafe_artifact_workspace(home) is True
     assert artifact_root(home) == (bub_home / "qq").resolve()
