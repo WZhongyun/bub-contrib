@@ -43,24 +43,37 @@ async def _run(env: DockerEnvironment, command: str) -> tuple[int, str, str]:
     return await process.wait(), stdout.decode(), stderr.decode()
 
 
-def test_commands_run_in_the_container_as_the_host_user(env) -> None:
+def test_commands_run_in_the_container_as_the_host_user(env, tmp_path) -> None:
     code, out, _ = asyncio.run(
         _run(env, "pwd; id -u; test -e /.dockerenv && echo in-docker")
     )
     assert code == 0
     pwd, uid, marker = out.split()
-    assert pwd == "/workspace"
+    assert pwd == str(tmp_path.resolve())
     assert uid == str(os.getuid())
     assert marker == "in-docker"
 
 
 def test_workspace_files_are_shared_with_the_host(env, tmp_path) -> None:
-    asyncio.run(env.write_text("/workspace/sub/note.txt", "héllo"))
+    # Same path inside and out: a host path Bub shows the model works as is.
+    workspace = tmp_path.resolve()
+    asyncio.run(env.write_text(f"{workspace}/sub/note.txt", "héllo"))
     assert (tmp_path / "sub" / "note.txt").read_text(encoding="utf-8") == "héllo"
     (tmp_path / "from-host.txt").write_text("hi", encoding="utf-8")
-    assert asyncio.run(env.read_text("/workspace/from-host.txt")) == "hi"
+    assert asyncio.run(env.read_text(env.resolve_path("from-host.txt"))) == "hi"
     with pytest.raises(FileNotFoundError):
-        asyncio.run(env.read_text("/workspace/missing.txt"))
+        asyncio.run(env.read_text(f"{workspace}/missing.txt"))
+
+
+def test_only_the_workspace_and_tmp_are_writable(env, tmp_path) -> None:
+    script = (
+        "touch /usr/bub-probe 2>&1; touch /etc/bub-probe 2>&1;"
+        " touch /tmp/ok && echo tmp-ok; touch ./ws-ok && echo ws-ok"
+    )
+    _, out, _ = asyncio.run(_run(env, script))
+    assert out.count("Read-only file system") == 2
+    assert "tmp-ok" in out and "ws-ok" in out
+    assert (tmp_path / "ws-ok").exists()
 
 
 def test_host_files_outside_the_workspace_are_not_visible(env, tmp_path) -> None:

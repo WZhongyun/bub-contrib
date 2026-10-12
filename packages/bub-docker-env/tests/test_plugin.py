@@ -55,8 +55,10 @@ def test_plugin_leaves_other_sessions_to_bub(monkeypatch, tmp_path, logs) -> Non
     assert plugin.provide_environment("cli:default", tmp_path) is None
     env = plugin.provide_environment("qq:group:g1", tmp_path)
     assert isinstance(env, DockerEnvironment)
-    assert env.workspace == "/workspace"
-    assert env.resolve_path("notes.md") == "/workspace/notes.md"
+    # The workspace keeps its host path, so paths in Bub's prompt work in the container.
+    workspace = str(tmp_path.resolve())
+    assert env.workspace == workspace
+    assert env.resolve_path("notes.md") == f"{workspace}/notes.md"
     assert any(
         "docker_env.session" in line
         and "qq:group:g1" in line
@@ -122,7 +124,8 @@ def test_container_is_locked_down(tmp_path) -> None:
         "--pids-limit 256",
         "--memory 1g",
         "--user 1000:1000",
-        f"--mount type=bind,source={tmp_path.resolve()},target=/workspace",
+        f"--mount type=bind,source={tmp_path.resolve()},target={tmp_path.resolve()}",
+        "--read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=512m",
     ):
         assert expected in joined
     # Only the workspace is mounted (skill mounts are covered separately).
@@ -252,7 +255,8 @@ def test_host_workspace_user_none_and_extra_args(tmp_path) -> None:
         host_workspace=tmp_path,
     )
     args = env.container.run_args()
-    assert "type=bind,source=/srv/bub/ws,target=/workspace" in args
+    # The daemon-side source differs; the container path stays Bub's path.
+    assert f"type=bind,source=/srv/bub/ws,target={tmp_path.resolve()}" in args
     assert "--user" not in args
     assert args[-6:-3] == ["--runtime=runsc", "--label", "a b=c"]
 
@@ -301,3 +305,15 @@ def test_mount_check_skips_an_empty_workspace(tmp_path, monkeypatch, logs) -> No
     )
     asyncio.run(env.container.ensure_started())
     assert any("docker_env.mount.unverified" in line for line in logs)
+
+
+def test_workdir_and_read_only_can_be_overridden(tmp_path) -> None:
+    env = DockerEnvironment(
+        _config(workdir="/workspace", read_only=False, mount_skills=False),
+        session_id="qq:group:g1",
+        host_workspace=tmp_path,
+    )
+    args = env.container.run_args()
+    assert env.workspace == "/workspace"
+    assert f"type=bind,source={tmp_path.resolve()},target=/workspace" in args
+    assert "--read-only" not in args

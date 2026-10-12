@@ -7,7 +7,7 @@ English documentation: [README.md](./README.md)
 ## 什么在哪里运行
 
 - 默认**所有会话**都进容器。会话 id 的格式是 `<渠道>:<聊天 id>`，所以设置 `sessions: "qq:*"` 就只让 QQ 聊天进容器，你自己的 `bub chat` / `bub run` 仍在宿主机执行。每个进容器的会话都会输出一条 `docker_env.session session_id=… container=…` 日志。
-- 容器挂载 **Bub 工作区**（位置 `/workspace`），以及工作区之外的 skill 目录（`~/.agents/skills` 和已安装插件自带的 skill），后者**只读、按宿主机原路径**挂载，这样 skill 让模型执行的脚本在容器里也能找到。密钥（`~/.bub/config.yml`、API key、状态文件）请放在工作区之外。skill 脚本依赖的 Python 包、命令行工具需要包含在镜像里。
+- 容器**按原路径**挂载 **Bub 工作区**（Bub 会在 prompt 里告诉模型工作区路径，所以容器里必须存在同一路径），以及工作区之外的 skill 目录（`~/.agents/skills` 和已安装插件自带的 skill），后者**只读、按宿主机原路径**挂载，这样 skill 让模型执行的脚本在容器里也能找到。密钥（`~/.bub/config.yml`、API key、状态文件）请放在工作区之外。skill 脚本依赖的 Python 包、命令行工具需要包含在镜像里。
 - 工具语义仍由 Bub 负责：超时、后台 shell、输出渲染和 hook 都不变，只是进程和文件访问挪进了容器。
 
 每个容器启动时的默认设置：
@@ -18,6 +18,7 @@ English documentation: [README.md](./README.md)
 | 用户 | 宿主机当前用户的 uid:gid，工作区里的文件归属不变 |
 | 权限 | 去掉全部 capabilities，并开启 `no-new-privileges` |
 | 资源限制 | 内存 1 GB、1 个 CPU、256 个进程 |
+| 根文件系统 | 只读；只有工作区和 512 MB 的 tmpfs `/tmp` 可写 |
 | 镜像 | `python:3.12-slim`（需要 `bash`、`setsid` 和 `python3`） |
 
 容器在会话第一次执行命令时启动，Bub 退出时删除。Docker 不可用时命令会直接失败，不会退回到宿主机执行。
@@ -36,13 +37,17 @@ docker_env:
   cpus: "1"
   pids_limit: 256
   user: ""                  # uid:gid；留空使用宿主机当前用户；"none" 表示不传 --user
-  workdir: /workspace
+  workdir: ""               # 留空：使用工作区自身的路径
+  read_only: true           # 只读根文件系统，/tmp 使用 tmpfs
+  tmp_size: 512m
   docker: docker            # 调用的 docker 命令
   mount_skills: true        # 以只读方式挂载工作区之外的 skill 目录
   host_workspace: ""        # Docker daemon 一侧看到的工作区路径
   mount_options: ""         # 挂载选项，例如 SELinux 用 "z"
   extra_run_args: ""        # 额外的 `docker run` 参数，例如 "--runtime=runsc"
 ```
+
+工作区本身必须可写，所以管理员批准的命令仍然可以删除其中的全部内容：不要在工作区里存放不可替代的文件。
 
 `scope: shared` 更省资源，但会话之间能看到彼此的进程和 `/tmp`。`network: bridge` 会让命令既能访问外网，**也能访问你的局域网**。
 

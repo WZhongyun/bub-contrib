@@ -120,6 +120,12 @@ class Container:
         self._started = False
         self._lock = asyncio.Lock()
 
+    @property
+    def workdir(self) -> str:
+        """The workspace's path inside the container."""
+
+        return self.config.workdir or str(self.host_workspace)
+
     def run_args(self) -> list[str]:
         config = self.config
         if config.user == "none":
@@ -141,9 +147,15 @@ class Container:
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--env", "HOME=/tmp",
-            *bind_args(source, config.workdir, options=config.mount_options),
-            "--workdir", config.workdir,
+            *bind_args(source, self.workdir, options=config.mount_options),
+            "--workdir", self.workdir,
         ]  # fmt: skip
+        if config.read_only:
+            args += [
+                "--read-only",
+                "--tmpfs",
+                f"/tmp:rw,exec,nosuid,nodev,size={config.tmp_size}",
+            ]
         if user:
             args += ["--user", user]
         # Skill paths are Bub-side paths; they only map when the daemon shares Bub's filesystem.
@@ -199,14 +211,14 @@ class Container:
             )
             return
         code, stdout, _ = await _docker(
-            self.config, "exec", self.name, "ls", "-A", self.config.workdir
+            self.config, "exec", self.name, "ls", "-A", self.workdir
         )
         seen = set(stdout.decode(errors="replace").splitlines()) if code == 0 else set()
         if host_names & seen:
             return
         raise DockerError(
             f"container {self.name} does not see the workspace {self.host_workspace} at"
-            f" {self.config.workdir}. The Docker daemon resolves bind mounts on its own"
+            f" {self.workdir}. The Docker daemon resolves bind mounts on its own"
             " host: if Bub runs in a container or uses a remote Docker, set"
             " docker_env.host_workspace to the workspace path on the Docker host."
         )
@@ -343,9 +355,9 @@ class DockerEnvironment(Environment):
         self, config: DockerEnvConfig, *, session_id: str, host_workspace: Path
     ) -> None:
         self.config = config
-        self.workspace = config.workdir
         self._key = session_id if config.scope == "session" else "shared"
         self.container = pool.acquire(self._key, config, host_workspace.resolve())
+        self.workspace = self.container.workdir
 
     async def spawn(
         self,
@@ -362,7 +374,7 @@ class DockerEnvironment(Environment):
             "exec",
             "--interactive",
             "--workdir",
-            cwd or self.config.workdir,
+            cwd or self.container.workdir,
         ]
         for key, value in (env or {}).items():
             args += ["--env", f"{key}={value}"]

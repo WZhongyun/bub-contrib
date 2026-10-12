@@ -80,8 +80,23 @@ class DockerEnvConfig(bub.Settings):
         ),
     )
     workdir: str = Field(
-        default="/workspace",
-        description="Where the host workspace is mounted in the container.",
+        default="",
+        description=(
+            "Where the workspace is mounted in the container. Empty uses the"
+            " workspace's own path, so paths Bub shows the model (its prompt"
+            " names the workspace) exist in the container too."
+        ),
+    )
+    read_only: bool = Field(
+        default=True,
+        description=(
+            "Run with a read-only root filesystem and a tmpfs /tmp, so only the"
+            " workspace and /tmp are writable. Turn off for images that must"
+            " install packages at runtime."
+        ),
+    )
+    tmp_size: str = Field(
+        default="512m", description="Size of the /tmp tmpfs when read_only is on."
     )
     docker: str = Field(default="docker", description="The docker CLI to call.")
     mount_skills: bool = Field(

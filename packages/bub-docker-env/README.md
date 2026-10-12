@@ -7,7 +7,7 @@ Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 ## What runs where
 
 - By default **every session** runs in a container. Session ids look like `<channel>:<chat id>`, so `sessions: "qq:*"` keeps only QQ chats in Docker while your own `bub chat` / `bub run` stay on the host. The log shows `docker_env.session session_id=… container=…` for each session that gets a container.
-- The container mounts **the Bub workspace** at `/workspace`, and skill directories outside it (`~/.agents/skills` and skills shipped by installed plugins) **read-only at their host paths**, so scripts a skill tells the model to run are found. Keep secrets (`~/.bub/config.yml`, API keys, state files) outside the workspace. Tools a skill script needs (Python packages, CLIs) must be in the image.
+- The container mounts **the Bub workspace at its own path** (Bub's prompt tells the model that path, so it must exist in the container too), and skill directories outside it (`~/.agents/skills` and skills shipped by installed plugins) **read-only at their host paths**, so scripts a skill tells the model to run are found. Keep secrets (`~/.bub/config.yml`, API keys, state files) outside the workspace. Tools a skill script needs (Python packages, CLIs) must be in the image.
 - Tool semantics stay in Bub: timeouts, background shells, output rendering and hooks are unchanged. Only processes and file access move into the container.
 
 Every container starts with:
@@ -18,6 +18,7 @@ Every container starts with:
 | user | the host user's uid:gid, so files in the workspace keep their owner |
 | capabilities | all dropped, `no-new-privileges` |
 | limits | 1 GB memory, 1 CPU, 256 processes |
+| root filesystem | read-only; only the workspace and a 512 MB tmpfs `/tmp` are writable |
 | image | `python:3.12-slim` (needs `bash`, `setsid` and `python3`) |
 
 Containers start on a session's first command and are removed when Bub stops. If Docker is unavailable, commands fail; they never fall back to the host.
@@ -36,13 +37,17 @@ docker_env:
   cpus: "1"
   pids_limit: 256
   user: ""                  # uid:gid; empty uses the host user; "none" passes no --user
-  workdir: /workspace
+  workdir: ""               # empty: the workspace's own path
+  read_only: true           # read-only root filesystem, tmpfs /tmp
+  tmp_size: 512m
   docker: docker            # the docker CLI to call
   mount_skills: true        # mount skill directories outside the workspace read-only
   host_workspace: ""        # the workspace path as the Docker daemon sees it
   mount_options: ""         # bind mount options, e.g. "z" for SELinux
   extra_run_args: ""        # extra `docker run` arguments, e.g. "--runtime=runsc"
 ```
+
+The workspace is writable by design, so a command an admin approves can still delete everything in it: keep nothing irreplaceable there.
 
 `scope: shared` is cheaper but lets sessions see each other's processes and `/tmp`. `network: bridge` lets commands reach the internet **and your local network**.
 
