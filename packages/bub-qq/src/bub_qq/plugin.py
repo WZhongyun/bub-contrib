@@ -1,3 +1,4 @@
+import json
 import time
 from typing import Any
 
@@ -132,7 +133,39 @@ def load_state(message: Any, session_id: str) -> TurnState | None:
     qq_context = context.get(QQ_CONTEXT_KEY)
     if not isinstance(qq_context, dict):
         return None
-    return {QQ_STATE_KEY: {**qq_context, "session_id": session_id}}
+    state = {**qq_context, "session_id": session_id}
+    if field_of(message, "kind") != "command":
+        state["batch_senders"] = _batch_senders(field_of(message, "content"))
+    return {QQ_STATE_KEY: state}
+
+
+# Stands for a merged line that names no sender; never an admin identity.
+UNKNOWN_SENDER = "?"
+
+
+def _batch_senders(content: object) -> list[str]:
+    """Every sender in a turn's content, which Bub may merge from several messages.
+
+    Each inbound message is one JSON line (``json.dumps`` escapes newlines in
+    the text), and a merged batch joins them with newlines. A line that is
+    not such a payload counts as an unknown sender.
+    """
+
+    if not isinstance(content, str):
+        return [UNKNOWN_SENDER]
+    senders: list[str] = []
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            payload = None
+        sender = payload.get("sender_id") if isinstance(payload, dict) else None
+        name = sender if isinstance(sender, str) and sender else UNKNOWN_SENDER
+        if name not in senders:
+            senders.append(name)
+    return senders
 
 
 @hookimpl

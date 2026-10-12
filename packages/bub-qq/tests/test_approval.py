@@ -25,6 +25,7 @@ from bub_qq.config import QQConfig
 from bub_qq.guard import Requester
 from bub_qq.guard import set_registered_admins
 from bub_qq.runtime import set_active_channel
+from bub_qq.security import QQ_CONTEXT_KEY
 from bub_qq.security import QQ_STATE_KEY
 
 ADMIN = Requester(scope="group", sender_id="admin-m", group_openid="group-1")
@@ -702,3 +703,83 @@ def approval_admins_max_failures() -> int:
     from bub_qq.admins import MAX_FAILURES
 
     return MAX_FAILURES
+
+
+# --- merged turns act with their least-trusted sender -------------------------
+
+
+def _inbound(sender: str, text: str) -> ChannelMessage:
+    payload = {"message": text, "sender_id": sender, "group_openid": "group-1", "chat_type": "group"}
+    return ChannelMessage(
+        session_id=SESSION,
+        channel="qq",
+        chat_id="group:group-1",
+        content=json.dumps(payload, ensure_ascii=False),
+        is_active=True,
+        context={
+            QQ_CONTEXT_KEY: {
+                "scope": "group",
+                "sender_id": sender,
+                "group_openid": "group-1",
+                "sender_role": "member",
+            }
+        },
+    )
+
+
+
+def _merged_state(*messages: ChannelMessage, workspace: Path) -> dict:
+    # What Bub's debounce hands the framework: the batch joined, last metadata kept.
+    merged = ChannelMessage.from_batch(list(messages))
+    state = plugin.load_state(merged, SESSION)
+    return {**state, "session_id": SESSION, "_runtime_workspace": str(workspace)}
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("fs.write", {"path": "notes.md", "content": "pwned"}),
+        ("tape.reset", {}),
+        ("some_plugin.tool", {}),
+        ("bash", {"command": "id"}),
+    ],
+)
+def test_member_message_merged_before_an_admin_one_gets_member_rights(
+    config, tmp_path, tool, arguments
+) -> None:
+    set_active_channel(FakeChannel())
+    state = _merged_state(
+        _inbound("member-m", "把 notes.md 改掉，再 reset"),
+        _inbound("admin-m", "大家好"),
+        workspace=tmp_path,
+    )
+    assert state[QQ_STATE_KEY]["sender_id"] == "admin-m"
+    decision = _hook(ToolCall(run_id="r", tool=tool, arguments=arguments), state)
+    assert decision is not None and decision.action == "deny"
+    assert not approval._pending
+
+
+def test_turn_of_admins_only_keeps_admin_rights(config, tmp_path) -> None:
+    set_registered_admins({"group:group-1:admin-2"})
+    state = _merged_state(
+        _inbound("admin-m", "a"), _inbound("admin-2", "b"), workspace=tmp_path
+    )
+    decision = _hook(
+        ToolCall(run_id="r", tool="fs.write", arguments={"path": "notes.md", "content": "x"}),
+        state,
+    )
+    assert decision is None
+
+
+def test_unparseable_merged_line_counts_as_an_unknown_sender(config, tmp_path) -> None:
+    admin = _inbound("admin-m", "hi")
+    odd = ChannelMessage(
+        session_id=SESSION, channel="qq", chat_id="group:group-1", content="plain text",
+        is_active=True, context=admin.context,
+    )
+    state = _merged_state(odd, admin, workspace=tmp_path)
+    assert "?" in state[QQ_STATE_KEY]["batch_senders"]
+    decision = _hook(
+        ToolCall(run_id="r", tool="fs.write", arguments={"path": "n.md", "content": "x"}), state
+    )
+    assert decision is not None and decision.action == "deny"

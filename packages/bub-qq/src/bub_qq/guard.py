@@ -111,6 +111,10 @@ class Requester:
     scope: Literal["group", "c2c"]
     sender_id: str
     group_openid: str = ""
+    # Other senders whose messages Bub merged into the same turn. Bub keeps
+    # only the last message's metadata, so without these a member's request
+    # could run with the rights of an admin who spoke right after it.
+    co_senders: tuple[str, ...] = ()
 
     @property
     def identity(self) -> str:
@@ -121,10 +125,13 @@ class Requester:
     @classmethod
     def from_state(cls, qq_state: dict[str, Any]) -> Requester:
         scope = "group" if str(qq_state.get("scope") or "") == "group" else "c2c"
+        sender_id = str(qq_state.get("sender_id") or "")
+        batch = qq_state.get("batch_senders") or ()
         return cls(
             scope=scope,
-            sender_id=str(qq_state.get("sender_id") or ""),
+            sender_id=sender_id,
             group_openid=str(qq_state.get("group_openid") or ""),
+            co_senders=tuple(str(item) for item in batch if str(item) != sender_id),
         )
 
 
@@ -133,12 +140,20 @@ def admin_entries(config: QQConfig) -> frozenset[str]:
 
 
 def is_admin(config: QQConfig, requester: Requester) -> bool:
-    """Scoped identities match exactly; bare openids (legacy) match any scope."""
+    """Scoped identities match exactly; bare openids (legacy) match any scope.
 
-    if not requester.sender_id:
-        return False
+    A turn carrying several senders' messages is an admin turn only when
+    every one of them is an admin: it acts with its least-trusted sender.
+    """
+
     entries = admin_entries(config)
-    return requester.identity in entries or requester.sender_id in entries
+    for sender_id in (requester.sender_id, *requester.co_senders):
+        if not sender_id:
+            return False
+        one = Requester(requester.scope, sender_id, requester.group_openid)
+        if one.identity not in entries and sender_id not in entries:
+            return False
+    return True
 
 
 def group_admin_member_ids(config: QQConfig, group_openid: str) -> list[str]:

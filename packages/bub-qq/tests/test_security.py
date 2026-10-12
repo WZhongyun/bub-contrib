@@ -91,7 +91,7 @@ def test_load_state_hook_injects_qq_context() -> None:
         session_id="qq:group:group-1",
         channel="qq",
         chat_id="group:group-1",
-        content="{}",
+        content='{"message": "hi", "sender_id": "member-1"}',
         context={
             QQ_CONTEXT_KEY: {
                 "scope": "group",
@@ -109,6 +109,7 @@ def test_load_state_hook_injects_qq_context() -> None:
             "sender_id": "member-1",
             "sender_role": "admin",
             "session_id": "qq:group:group-1",
+            "batch_senders": ["member-1"],
         }
     }
 
