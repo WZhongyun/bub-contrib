@@ -53,7 +53,31 @@ class DockerEnvConfig(bub.Settings):
     )
     user: str = Field(
         default="",
-        description="uid:gid to run as; empty uses the host user's, so files in the workspace keep their owner.",
+        description=(
+            "uid:gid to run as; empty uses the host user's, so files in the"
+            " workspace keep their owner; 'none' passes no --user (rootless"
+            " Docker, or Podman with --userns=keep-id in extra_run_args)."
+        ),
+    )
+    host_workspace: str = Field(
+        default="",
+        description=(
+            "The workspace path as the Docker daemon sees it. The daemon resolves"
+            " bind mounts on its own host, so set this when Bub runs in a container"
+            " using the host's docker.sock, or talks to a remote Docker. Skill"
+            " directories are not mounted then, since their paths do not map either."
+        ),
+    )
+    mount_options: str = Field(
+        default="",
+        description="Bind mount options, e.g. 'z' to relabel for SELinux.",
+    )
+    extra_run_args: str = Field(
+        default="",
+        description=(
+            "Extra `docker run` arguments, shell-quoted, e.g. '--runtime=runsc'"
+            " for gVisor or '--userns=keep-id' for Podman."
+        ),
     )
     workdir: str = Field(
         default="/workspace",

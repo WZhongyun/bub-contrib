@@ -35,13 +35,32 @@ docker_env:
   memory: 1g
   cpus: "1"
   pids_limit: 256
-  user: ""                  # uid:gid；留空使用宿主机当前用户
+  user: ""                  # uid:gid；留空使用宿主机当前用户；"none" 表示不传 --user
   workdir: /workspace
   docker: docker            # 调用的 docker 命令
   mount_skills: true        # 以只读方式挂载工作区之外的 skill 目录
+  host_workspace: ""        # Docker daemon 一侧看到的工作区路径
+  mount_options: ""         # 挂载选项，例如 SELinux 用 "z"
+  extra_run_args: ""        # 额外的 `docker run` 参数，例如 "--runtime=runsc"
 ```
 
 `scope: shared` 更省资源，但会话之间能看到彼此的进程和 `/tmp`。`network: bridge` 会让命令既能访问外网，**也能访问你的局域网**。
+
+## 部署注意事项
+
+Docker daemon 是在**它自己所在的机器上**解析挂载路径的，而不是在 Bub 所在的地方。容器投入使用前，插件会比较工作区里的文件名和容器内 `/workspace` 看到的内容，一个都对不上就拒绝使用这个容器。这样挂错时会直接报错，而不是悄悄挂进一个空目录或无关目录。工作区为空时无法比较，日志里会出现 `docker_env.mount.unverified`。
+
+| 部署方式 | 需要配置 |
+| --- | --- |
+| Bub 直接运行在 Docker 宿主机上（macOS、Linux） | 无 |
+| Bub 运行在容器里并使用宿主机的 `docker.sock`，或使用远程 `DOCKER_HOST` | `host_workspace`：工作区在 Docker 宿主机上的路径。此时不挂载 skill 目录 |
+| SELinux（Fedora、RHEL） | `mount_options: z` |
+| rootless Docker | `user: none` |
+| Podman | `user: none`，并设置 `extra_run_args: "--userns=keep-id"` |
+| 用 gVisor 获得更强隔离 | `extra_run_args: "--runtime=runsc"` |
+| Docker Desktop | 工作区必须位于共享路径下（Settings → Resources → File sharing） |
+
+本插件需要 Docker daemon。Kubernetes 集群和托管的 Agent 沙箱通常不提供 Docker daemon，需要使用对接其自身 API 的执行环境插件。
 
 ## 安装
 

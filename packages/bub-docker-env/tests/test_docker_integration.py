@@ -119,3 +119,30 @@ def test_run_code_calls_back_into_bub(env) -> None:
     )
     assert calls == [("echo", {"text": "hi"})]
     assert "".join(output).strip() == "hi 2"
+
+
+def test_a_mount_that_is_not_the_workspace_is_refused(tmp_path, monkeypatch) -> None:
+    """What a Bub-in-a-container deployment would hit without host_workspace."""
+
+    monkeypatch.setattr(environment, "pool", _ContainerPool())
+    workspace = tmp_path / "bub-side-workspace"
+    workspace.mkdir()
+    (workspace / "notes.md").write_text("x", encoding="utf-8")
+    elsewhere = tmp_path / "unrelated-dir-on-docker-host"
+    elsewhere.mkdir()
+    (elsewhere / "other.txt").write_text("y", encoding="utf-8")
+    config = DockerEnvConfig(host_workspace=str(elsewhere))
+    env = DockerEnvironment(
+        config, session_id="qq:test:wrong-mount", host_workspace=workspace
+    )
+    try:
+        with pytest.raises(environment.DockerError, match="host_workspace"):
+            asyncio.run(env.spawn("true"))
+        listed = subprocess.run(
+            ["docker", "ps", "-a", "-q", "--filter", f"name={env.container.name}"],
+            capture_output=True,
+            check=False,
+        )
+        assert listed.stdout.strip() == b""
+    finally:
+        asyncio.run(env.close())

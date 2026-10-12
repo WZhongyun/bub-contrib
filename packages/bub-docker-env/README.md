@@ -35,13 +35,32 @@ docker_env:
   memory: 1g
   cpus: "1"
   pids_limit: 256
-  user: ""                  # uid:gid; empty uses the host user
+  user: ""                  # uid:gid; empty uses the host user; "none" passes no --user
   workdir: /workspace
   docker: docker            # the docker CLI to call
   mount_skills: true        # mount skill directories outside the workspace read-only
+  host_workspace: ""        # the workspace path as the Docker daemon sees it
+  mount_options: ""         # bind mount options, e.g. "z" for SELinux
+  extra_run_args: ""        # extra `docker run` arguments, e.g. "--runtime=runsc"
 ```
 
 `scope: shared` is cheaper but lets sessions see each other's processes and `/tmp`. `network: bridge` lets commands reach the internet **and your local network**.
+
+## Deployment notes
+
+The Docker daemon resolves bind mounts **on its own host**, not where Bub runs. Before a container is used, the plugin compares the workspace's entries with what the container sees at `/workspace`, and refuses the container if none match, so a wrong mount fails instead of silently showing an empty or unrelated directory. An empty workspace cannot be checked; the log then shows `docker_env.mount.unverified`.
+
+| Deployment | What to set |
+| --- | --- |
+| Bub on the Docker host (macOS, Linux) | nothing |
+| Bub in a container using the host's `docker.sock`, or a remote `DOCKER_HOST` | `host_workspace`: the workspace path on the Docker host. Skill directories are then not mounted |
+| SELinux (Fedora, RHEL) | `mount_options: z` |
+| Rootless Docker | `user: none` |
+| Podman | `user: none` and `extra_run_args: "--userns=keep-id"` |
+| Stronger isolation with gVisor | `extra_run_args: "--runtime=runsc"` |
+| Docker Desktop | the workspace must be under a shared path (Settings → Resources → File sharing) |
+
+This plugin needs a Docker daemon. Kubernetes clusters and hosted agent sandboxes usually do not expose one; they need an environment provider for their own API.
 
 ## Install
 

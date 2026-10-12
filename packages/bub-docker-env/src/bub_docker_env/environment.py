@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import importlib
 import os
+import shlex
 import subprocess
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -77,6 +78,35 @@ def skill_mounts(host_workspace: Path) -> list[Path]:
     return mounts
 
 
+def _csv_field(field: str) -> str:
+    # docker --mount parses CSV: quote a field holding a comma or a quote.
+    if "," in field or '"' in field:
+        return '"' + field.replace('"', '""') + '"'
+    return field
+
+
+def bind_args(
+    source: str, target: str, *, readonly: bool = False, options: str = ""
+) -> list[str]:
+    """``docker run`` arguments for one bind mount.
+
+    ``--mount`` takes any path; mount options such as SELinux's ``z`` only
+    exist in the ``--volume src:dst:opts`` syntax, which cannot hold ``:``.
+    """
+
+    if options:
+        if ":" in source or ":" in target:
+            raise DockerError(
+                f"cannot bind {source} with mount_options: the path contains ':'"
+            )
+        flags = ",".join(item for item in ("ro" if readonly else "", options) if item)
+        return ["--volume", f"{source}:{target}:{flags}"]
+    fields = ["type=bind", f"source={source}", f"target={target}"]
+    if readonly:
+        fields.append("readonly")
+    return ["--mount", ",".join(_csv_field(field) for field in fields)]
+
+
 class Container:
     """One long-lived container, started on first use and removed when released."""
 
@@ -92,9 +122,13 @@ class Container:
 
     def run_args(self) -> list[str]:
         config = self.config
-        user = config.user or (
-            f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else ""
-        )
+        if config.user == "none":
+            user = ""
+        else:
+            user = config.user or (
+                f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else ""
+            )
+        source = config.host_workspace or str(self.host_workspace)
         args = [
             "run", "--detach", "--rm", "--init",
             "--name", self.name,
@@ -107,14 +141,18 @@ class Container:
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--env", "HOME=/tmp",
-            "--volume", f"{self.host_workspace}:{config.workdir}",
+            *bind_args(source, config.workdir, options=config.mount_options),
             "--workdir", config.workdir,
         ]  # fmt: skip
         if user:
             args += ["--user", user]
-        if config.mount_skills:
+        # Skill paths are Bub-side paths; they only map when the daemon shares Bub's filesystem.
+        if config.mount_skills and not config.host_workspace:
             for root in skill_mounts(self.host_workspace):
-                args += ["--volume", f"{root}:{root}:ro"]
+                args += bind_args(
+                    str(root), str(root), readonly=True, options=config.mount_options
+                )
+        args += shlex.split(config.extra_run_args)
         return [*args, config.image, "sleep", "infinity"]
 
     async def ensure_started(self) -> None:
@@ -128,6 +166,11 @@ class Container:
                 raise DockerError(
                     f"could not start container {self.name}: {stderr.decode(errors='replace').strip()}"
                 )
+            try:
+                await self._check_workspace_mount()
+            except DockerError:
+                await _docker(self.config, "rm", "--force", self.name)
+                raise
             self._started = True
             logger.info(
                 "docker_env.container.started name={} key={} image={} network={}",
@@ -136,6 +179,37 @@ class Container:
                 self.config.image,
                 self.config.network,
             )
+
+    async def _check_workspace_mount(self) -> None:
+        """Refuse a container whose workspace is not Bub's workspace.
+
+        The daemon resolves the mount source on its own host. When Bub runs in
+        a container or talks to a remote Docker, that can silently mount an
+        empty or unrelated directory. Compare entry names, without writing.
+        """
+
+        try:
+            host_names = set(os.listdir(self.host_workspace))
+        except OSError:
+            return
+        if not host_names:
+            logger.info(
+                "docker_env.mount.unverified name={} reason=workspace is empty",
+                self.name,
+            )
+            return
+        code, stdout, _ = await _docker(
+            self.config, "exec", self.name, "ls", "-A", self.config.workdir
+        )
+        seen = set(stdout.decode(errors="replace").splitlines()) if code == 0 else set()
+        if host_names & seen:
+            return
+        raise DockerError(
+            f"container {self.name} does not see the workspace {self.host_workspace} at"
+            f" {self.config.workdir}. The Docker daemon resolves bind mounts on its own"
+            " host: if Bub runs in a container or uses a remote Docker, set"
+            " docker_env.host_workspace to the workspace path on the Docker host."
+        )
 
     async def remove(self) -> None:
         async with self._lock:

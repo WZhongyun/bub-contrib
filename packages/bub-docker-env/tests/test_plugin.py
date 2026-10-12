@@ -91,13 +91,20 @@ def test_skill_directories_are_mounted_read_only_at_host_paths(
         _config(), session_id="qq:group:g1", host_workspace=workspace
     )
     joined = " ".join(env.container.run_args())
-    assert f"--volume {user_skills.resolve()}:{user_skills.resolve()}:ro" in joined
-    assert f"--volume {plugin_skills.resolve()}:{plugin_skills.resolve()}:ro" in joined
+    for root in (user_skills.resolve(), plugin_skills.resolve()):
+        assert f"--mount type=bind,source={root},target={root},readonly" in joined
 
     off = DockerEnvironment(
         _config(mount_skills=False), session_id="qq:group:g2", host_workspace=workspace
     )
-    assert off.container.run_args().count("--volume") == 1
+    assert off.container.run_args().count("--mount") == 1
+    # host_workspace means the daemon is elsewhere: skill paths would not map.
+    remote = DockerEnvironment(
+        _config(host_workspace="/srv/ws"),
+        session_id="qq:group:g3",
+        host_workspace=workspace,
+    )
+    assert remote.container.run_args().count("--mount") == 1
 
 
 def test_container_is_locked_down(tmp_path) -> None:
@@ -115,11 +122,12 @@ def test_container_is_locked_down(tmp_path) -> None:
         "--pids-limit 256",
         "--memory 1g",
         "--user 1000:1000",
-        f"--volume {tmp_path.resolve()}:/workspace",
+        f"--mount type=bind,source={tmp_path.resolve()},target=/workspace",
     ):
         assert expected in joined
     # Only the workspace is mounted (skill mounts are covered separately).
-    assert args.count("--volume") == 1
+    assert args.count("--mount") == 1
+    assert "--volume" not in args
     assert args[-3:] == ["python:3.12-slim", "sleep", "infinity"]
 
 
@@ -203,3 +211,93 @@ def test_config_reads_environment(monkeypatch) -> None:
     config = DockerEnvConfig()
     assert config.network == "bridge"
     assert config.scope == "shared"
+
+
+@pytest.mark.parametrize(
+    ("source", "options", "expected"),
+    [
+        ("/a/ws", "", ["--mount", "type=bind,source=/a/ws,target=/workspace"]),
+        ("/a/b,c", "", ["--mount", 'type=bind,"source=/a/b,c",target=/workspace']),
+        ("/a/ws", "z", ["--volume", "/a/ws:/workspace:z"]),
+    ],
+)
+def test_bind_args(source, options, expected) -> None:
+    assert environment.bind_args(source, "/workspace", options=options) == expected
+
+
+def test_readonly_bind_args() -> None:
+    assert environment.bind_args("/s", "/s", readonly=True) == [
+        "--mount",
+        "type=bind,source=/s,target=/s,readonly",
+    ]
+    assert environment.bind_args("/s", "/s", readonly=True, options="z") == [
+        "--volume",
+        "/s:/s:ro,z",
+    ]
+
+
+def test_mount_options_reject_paths_with_colons() -> None:
+    with pytest.raises(environment.DockerError, match="contains ':'"):
+        environment.bind_args("/a:b", "/workspace", options="z")
+
+
+def test_host_workspace_user_none_and_extra_args(tmp_path) -> None:
+    env = DockerEnvironment(
+        _config(
+            host_workspace="/srv/bub/ws",
+            user="none",
+            extra_run_args="--runtime=runsc --label 'a b=c'",
+        ),
+        session_id="qq:group:g1",
+        host_workspace=tmp_path,
+    )
+    args = env.container.run_args()
+    assert "type=bind,source=/srv/bub/ws,target=/workspace" in args
+    assert "--user" not in args
+    assert args[-6:-3] == ["--runtime=runsc", "--label", "a b=c"]
+
+
+def _fake_docker(monkeypatch, ls_output: str) -> list[tuple[str, ...]]:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake(config, *args, stdin=None):
+        calls.append(args)
+        if args[:1] == ("exec",):
+            return 0, ls_output.encode(), b""
+        return 0, b"", b""
+
+    monkeypatch.setattr(environment, "_docker", fake)
+    return calls
+
+
+def test_mount_check_accepts_the_real_workspace(tmp_path, monkeypatch) -> None:
+    (tmp_path / "notes.md").write_text("x", encoding="utf-8")
+    _fake_docker(monkeypatch, "notes.md\noutbox\n")
+    env = DockerEnvironment(
+        _config(), session_id="qq:group:g1", host_workspace=tmp_path
+    )
+    asyncio.run(env.container.ensure_started())
+    assert env.container._started
+
+
+def test_mount_check_refuses_a_wrong_mount_and_removes_the_container(
+    tmp_path, monkeypatch, logs
+) -> None:
+    (tmp_path / "notes.md").write_text("x", encoding="utf-8")
+    calls = _fake_docker(monkeypatch, "etc\nunrelated\n")
+    env = DockerEnvironment(
+        _config(), session_id="qq:group:g1", host_workspace=tmp_path
+    )
+    with pytest.raises(environment.DockerError, match="host_workspace"):
+        asyncio.run(env.container.ensure_started())
+    assert not env.container._started
+    assert calls[-1] == ("rm", "--force", env.container.name)
+
+
+def test_mount_check_skips_an_empty_workspace(tmp_path, monkeypatch, logs) -> None:
+    _fake_docker(monkeypatch, "")
+    env = DockerEnvironment(
+        _config(), session_id="qq:group:g1", host_workspace=tmp_path
+    )
+    asyncio.run(env.container.ensure_started())
+    assert any("docker_env.mount.unverified" in line for line in logs)
