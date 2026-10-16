@@ -33,3 +33,12 @@ def test_request_signature_accepts_valid_signature() -> None:
         body=body,
         signature_hex=signature,
     )
+
+
+def test_empty_secret_is_rejected_instead_of_looping() -> None:
+    import pytest
+
+    from bub_qq.protocol.signature import derive_public_key
+
+    with pytest.raises(ValueError, match="empty"):
+        derive_public_key("")

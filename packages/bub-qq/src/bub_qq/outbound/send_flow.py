@@ -38,8 +38,15 @@ from .send_errors import is_pending_audit_error
 from .send_errors import log_send_duplicate_error
 from .send_errors import log_send_error
 
-DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS = 3600.0
-DEFAULT_PASSIVE_REPLIES_PER_MSG_ID = 4
+# Platform limits for passive replies (QQ OpenAPI docs): C2C messages can
+# be answered for 60 minutes, at most 4 times; group messages for 5
+# minutes, at most 5 times.
+C2C_PASSIVE_REPLY_WINDOW_SECONDS = 3600.0
+C2C_PASSIVE_REPLIES_PER_MSG_ID = 4
+GROUP_PASSIVE_REPLY_WINDOW_SECONDS = 300.0
+GROUP_PASSIVE_REPLIES_PER_MSG_ID = 5
+DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS = C2C_PASSIVE_REPLY_WINDOW_SECONDS
+DEFAULT_PASSIVE_REPLIES_PER_MSG_ID = C2C_PASSIVE_REPLIES_PER_MSG_ID
 
 # Pseudo msg_id used to key dedupe records for active (proactive) sends.
 ACTIVE_MSG_ID = "__active__"
@@ -74,6 +81,10 @@ class ActiveSender(Protocol):
     async def __call__(self, *, content: str) -> dict[str, object]: ...
 
 
+class MediaSender(Protocol):
+    async def __call__(self, *, msg_id: str, msg_seq: int) -> dict[str, object]: ...
+
+
 async def run_send_flow(
     *,
     state: QQSessionState,
@@ -87,8 +98,12 @@ async def run_send_flow(
     passive_replies_per_msg_id: int = DEFAULT_PASSIVE_REPLIES_PER_MSG_ID,
     send_active_text: ActiveSender | None = None,
     active_messages_allowed: bool | None = None,
+    send_media: MediaSender | None = None,
+    force_markdown: bool = False,
+    dedupe_content: str | None = None,
+    reply_to: str | None = None,
 ) -> dict[str, object] | None:
-    msg_id = state.latest_message_id_by_session.get(session_id)
+    msg_id = reply_target(state, session_id, reply_to)
     passive_blocked_reason = _passive_blocked_reason(
         state,
         session_id=session_id,
@@ -106,6 +121,9 @@ async def run_send_flow(
             msg_id=msg_id,
             send_text=send_text,
             send_markdown=send_markdown,
+            send_media=send_media,
+            force_markdown=force_markdown,
+            dedupe_content=dedupe_content,
         )
 
     logger.info(
@@ -114,6 +132,20 @@ async def run_send_flow(
         msg_id or "-",
         passive_blocked_reason,
     )
+    if send_media is not None:
+        logger.warning(
+            "qq.send skipped session_id={} reason={} media=requires_passive",
+            session_id,
+            passive_blocked_reason,
+        )
+        return None
+    if force_markdown:
+        logger.warning(
+            "qq.send skipped session_id={} reason={} keyboard=requires_passive_markdown",
+            session_id,
+            passive_blocked_reason,
+        )
+        return None
     if send_active_text is None:
         logger.warning(
             "qq.send skipped session_id={} reason={} active=unavailable",
@@ -133,6 +165,7 @@ async def run_send_flow(
         target_openid=target_openid,
         content=content,
         send_active_text=send_active_text,
+        dedupe_content=dedupe_content,
     )
 
 
@@ -146,8 +179,11 @@ async def _run_passive_send(
     msg_id: str,
     send_text: MarkdownSender,
     send_markdown: MarkdownSender,
+    send_media: MediaSender | None = None,
+    force_markdown: bool = False,
+    dedupe_content: str | None = None,
 ) -> dict[str, object] | None:
-    content_hash = hash_outbound_content(content)
+    content_hash = hash_outbound_content(dedupe_content or content)
     record_key = (session_id, msg_id, content_hash)
     existing = state.send_records.get(record_key)
     if existing is not None:
@@ -163,13 +199,17 @@ async def _run_passive_send(
 
     msg_seq = next_msg_seq(state, session_id, msg_id)
     try:
-        result = await send_with_markdown_fallback(
-            content=content,
-            msg_id=msg_id,
-            msg_seq=msg_seq,
-            send_text=send_text,
-            send_markdown=send_markdown,
-        )
+        if send_media is not None:
+            result = await send_media(msg_id=msg_id, msg_seq=msg_seq)
+        else:
+            result = await send_with_markdown_fallback(
+                content=content,
+                msg_id=msg_id,
+                msg_seq=msg_seq,
+                send_text=send_text,
+                send_markdown=send_markdown,
+                force_markdown=force_markdown,
+            )
     except QQOpenAPIError as exc:
         if is_duplicate_send_error(exc):
             log_send_duplicate_error(
@@ -207,7 +247,8 @@ async def _run_passive_send(
             msg_seq=msg_seq,
             receive_mode=receive_mode,
         )
-        return None
+        release_unused_msg_seq(state, session_id, msg_id, msg_seq)
+        return build_failed_send_result(exc)
 
     state.send_records[record_key] = QQSendRecord(
         content=content,
@@ -233,8 +274,9 @@ async def _run_active_send(
     target_openid: str,
     content: str,
     send_active_text: ActiveSender,
+    dedupe_content: str | None = None,
 ) -> dict[str, object] | None:
-    content_hash = hash_outbound_content(content)
+    content_hash = hash_outbound_content(dedupe_content or content)
     record_key = (session_id, ACTIVE_MSG_ID, content_hash)
     existing = state.send_records.get(record_key)
     if existing is not None:
@@ -268,7 +310,7 @@ async def _run_active_send(
             exc.trace_id or "-",
             exc.error_message,
         )
-        return None
+        return build_failed_send_result(exc)
 
     state.send_records[record_key] = QQSendRecord(
         content=content,
@@ -296,7 +338,7 @@ def _passive_blocked_reason(
     if not msg_id:
         return "missing_msg_id"
     if not is_passive_reply_window_open(
-        state, session_id, window_seconds=window_seconds
+        state, session_id, window_seconds=window_seconds, msg_id=msg_id
     ):
         return "passive_reply_window_expired"
     used = state.latest_sequence_by_session_and_msg_id.get((session_id, msg_id), 0)
@@ -341,6 +383,31 @@ def next_msg_seq(state: QQSessionState, session_id: str, msg_id: str) -> int:
     return current
 
 
+def release_unused_msg_seq(
+    state: QQSessionState, session_id: str, msg_id: str, msg_seq: int
+) -> None:
+    """Give back a seq that never produced a platform-accepted message.
+
+    Only rolls back when this seq is still the latest, so a later concurrent
+    send is not rewritten to a stale counter.
+    """
+
+    key = (session_id, msg_id)
+    if state.latest_sequence_by_session_and_msg_id.get(key) == msg_seq:
+        state.latest_sequence_by_session_and_msg_id[key] = msg_seq - 1
+
+
+def build_failed_send_result(exc: QQOpenAPIError) -> dict[str, object]:
+    result: dict[str, object] = {"status": "failed", "error": exc.error_message}
+    if exc.error_code is not None:
+        result["error_code"] = exc.error_code
+    return result
+
+
+def is_delivered_send_result(result: dict[str, object] | None) -> bool:
+    return bool(result) and result.get("status") != "failed"
+
+
 def build_already_sent_result(send_record: QQSendRecord) -> dict[str, object]:
     result = dict(send_record.result)
     result["status"] = "already_sent"
@@ -357,16 +424,38 @@ def normalize_outbound_content(content: str) -> str:
     return _strip_edge_special_tokens(normalized)
 
 
+def reply_target(
+    state: QQSessionState, session_id: str, reply_to: str | None
+) -> str | None:
+    """The message to reply to: ``reply_to`` when it belongs to this chat.
+
+    ``reply_to`` is the message that triggered the turn (known in tool
+    mode). Without it — direct mode, approval notices — the latest message
+    of the chat is used.
+    """
+
+    if reply_to:
+        known = state.message_by_id.get(reply_to)
+        if known is not None and known[0] == session_id:
+            return reply_to
+    return state.latest_message_id_by_session.get(session_id)
+
+
 def is_passive_reply_window_open(
     state: QQSessionState,
     session_id: str,
     *,
     window_seconds: float = DEFAULT_PASSIVE_REPLY_WINDOW_SECONDS,
+    msg_id: str | None = None,
 ) -> bool:
     # Fail open on a missing or unparsable timestamp: blocking the reply
     # locally would be worse than letting QQ reject an expired one, and QQ
     # events are not guaranteed to carry a timestamp.
-    timestamp = state.latest_timestamp_by_session.get(session_id)
+    known = state.message_by_id.get(msg_id) if msg_id else None
+    if known is not None and known[0] == session_id:
+        timestamp = known[1]
+    else:
+        timestamp = state.latest_timestamp_by_session.get(session_id)
     if not timestamp:
         return True
     try:

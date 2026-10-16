@@ -17,6 +17,16 @@ from ..protocol.signature import verify_request_signature
 
 WebhookCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
+# QQ callback bodies are small JSON events. The body is read before the
+# signature can be checked, so an unauthenticated client must not be able
+# to make us buffer an arbitrary amount of data or hold a thread forever.
+MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
+REQUEST_TIMEOUT_SECONDS = 15.0
+
+
+class _BodyTooLarge(ValueError):
+    pass
+
 
 class QQWebhookServer:
     """Embedded HTTP webhook receiver for QQ callback events."""
@@ -69,6 +79,8 @@ class QQWebhookServer:
         parent = self
 
         class Handler(BaseHTTPRequestHandler):
+            timeout = REQUEST_TIMEOUT_SECONDS
+
             def do_POST(self) -> None:  # noqa: N802
                 parent._handle_post(self)
 
@@ -83,6 +95,11 @@ class QQWebhookServer:
             return
         try:
             body = self._read_body(handler)
+        except _BodyTooLarge as exc:
+            self._write_json(
+                handler, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(exc)}
+            )
+            return
         except ValueError as exc:
             self._write_json(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
@@ -151,7 +168,17 @@ class QQWebhookServer:
         )
 
     def _read_body(self, handler: BaseHTTPRequestHandler) -> bytes:
-        content_length = int(handler.headers.get("Content-Length", "0"))
+        raw = handler.headers.get("Content-Length", "0")
+        try:
+            content_length = int(raw)
+        except ValueError:
+            raise ValueError("invalid Content-Length") from None
+        if content_length < 0:
+            raise ValueError("invalid Content-Length")
+        if content_length > MAX_WEBHOOK_BODY_BYTES:
+            raise _BodyTooLarge(
+                f"body larger than {MAX_WEBHOOK_BODY_BYTES} bytes"
+            )
         return handler.rfile.read(content_length)
 
     def _parse_json(self, body: bytes) -> dict[str, Any]:

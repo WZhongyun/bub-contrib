@@ -1,11 +1,12 @@
-"""Persistent platform-controlled switches for the QQ channel.
+"""Persistent QQ channel state that must survive restarts.
 
-Group owners/admins toggle two things from the QQ client that the bot
-must remember across restarts: whether proactive (active) messages are
-allowed (``GROUP_MSG_RECEIVE`` / ``GROUP_MSG_REJECT`` and the C2C
-equivalents) and the group's message-scope setting delivered through
-``claw_cfg`` interaction updates. This store keeps both in one small
-JSON file with atomic writes.
+One small JSON file, written atomically, holds:
+
+- admins registered with ``,qq.claim`` (merged with ``admin_users``);
+- whether proactive (active) messages are allowed, toggled from the QQ
+  client (``GROUP_MSG_RECEIVE`` / ``GROUP_MSG_REJECT`` and the C2C
+  equivalents);
+- each group's message-scope setting from ``claw_cfg`` interactions.
 """
 
 from __future__ import annotations
@@ -14,11 +15,25 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+if TYPE_CHECKING:
+    from .config import QQConfig
+
 _SECTION_BY_SCOPE = {"group": "groups", "c2c": "users"}
+
+
+def resolve_state_path(config: QQConfig) -> Path:
+    """``state_file`` from config, or ``<bub home>/qq/state.json``."""
+
+    raw = (config.state_file or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    import bub
+
+    return bub.home / "qq" / "state.json"
 
 
 class QQPlatformStore:
@@ -29,6 +44,7 @@ class QQPlatformStore:
         self._data: dict[str, dict[str, dict[str, Any]]] = {
             "groups": {},
             "users": {},
+            "admins": {},
         }
         self._load()
 
@@ -56,6 +72,21 @@ class QQPlatformStore:
 
         value = self.get("group", group_openid).get("require_mention")
         return value if isinstance(value, str) and value else None
+
+    def admins(self) -> frozenset[str]:
+        """Identities registered as admins with ``,qq.claim``."""
+
+        return frozenset(self._data["admins"])
+
+    def add_admin(self, identity: str, **fields: Any) -> None:
+        self._data["admins"][identity] = dict(fields)
+        self._save()
+
+    def remove_admin(self, identity: str) -> bool:
+        if self._data["admins"].pop(identity, None) is None:
+            return False
+        self._save()
+        return True
 
     def _load(self) -> None:
         try:

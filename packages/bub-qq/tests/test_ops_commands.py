@@ -8,9 +8,7 @@ from bub_qq import tools
 
 
 def test_qq_version_is_registered_as_command_only() -> None:
-    tool = REGISTRY["qq.version"]
-
-    assert tool.exposure == "command"
+    assert REGISTRY["qq.version"].exposure == "command"
     assert REGISTRY["qq.send"].exposure == "auto"
 
 

@@ -741,6 +741,13 @@ KNOWN_OPENAPI_ERRORS: dict[int, QQKnownOpenAPIError] = {
     ),
     1100308: _e(1100308, "CHANNEL_RATE_LIMIT", "触发频道内限频", "rate_limit", True),
     1100499: _e(1100499, "OTHER_SEND_ERROR", "其他错误", "send", True),
+    850027: _e(
+        850027,
+        "RICH_MEDIA_UPLOAD_TIMEOUT",
+        "富媒体文件上传超时",
+        "media",
+        False,
+    ),
     3300006: _e(
         3300006, "EDIT_MESSAGE_SAFETY_BLOCK", "编辑消息安全打击", "edit_message", False
     ),

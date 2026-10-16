@@ -115,3 +115,24 @@ def test_group_message_member_role_defaults_to_none() -> None:
     )
 
     assert message.member_role is None
+
+
+def test_c2c_message_parses_ark_data() -> None:
+    message = QQC2CMessage.from_event(
+        {
+            "t": "C2C_MESSAGE_CREATE",
+            "d": {
+                "author": {"user_openid": "user-openid"},
+                "content": "",
+                "id": "message-ark-1",
+                "message_type": 3,
+                "ark_data": {"template_id": 1, "kv": [{"key": "title", "value": "hi"}]},
+            },
+        }
+    )
+
+    assert message.message_type == 3
+    assert message.ark_data == {
+        "template_id": 1,
+        "kv": [{"key": "title", "value": "hi"}],
+    }

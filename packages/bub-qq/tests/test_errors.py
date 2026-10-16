@@ -54,3 +54,12 @@ def test_lookup_known_error_covers_new_reply_expired_code() -> None:
 
     assert known is not None
     assert known.name == "ReplyMessageExpired"
+
+
+def test_lookup_known_error_covers_rich_media_upload_timeout() -> None:
+    known = lookup_known_error(850027)
+
+    assert known is not None
+    assert known.name == "RICH_MEDIA_UPLOAD_TIMEOUT"
+    assert known.category == "media"
+    assert known.retryable is False

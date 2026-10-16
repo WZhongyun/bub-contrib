@@ -7,67 +7,43 @@ from bub.channels.message import ChannelMessage
 from loguru import logger
 
 from ..protocol.models import QQC2CMessage
+from ..guard import Requester
 from ..security import QQ_CONTEXT_KEY
-from ..security import QQAccessPolicy
-from ..session import QQInboundDeduper
-from ..session import QQSessionState
-from ..session import remember_session
+from ..admins import is_admin_command
+from ..security import strip_command
 from .common import attachment_payloads
 from .common import exclude_none
+from .common import QQInboundService
 from .common import msg_element_payloads
+from .common import resolve_scoped_openid
 
 
-class QQC2CInboundService:
-    def __init__(
-        self,
-        *,
-        channel_name: str,
-        deduper: QQInboundDeduper,
-        state: QQSessionState,
-        policy: QQAccessPolicy,
-        suppress_direct_output: bool = False,
-    ) -> None:
-        self._channel_name = channel_name
-        self._deduper = deduper
-        self._state = state
-        self._policy = policy
-        self._suppress_direct_output = suppress_direct_output
+class QQC2CInboundService(QQInboundService[QQC2CMessage]):
+    scope = "c2c"
 
-    def parse_inbound(
-        self, payload: dict[str, Any]
-    ) -> tuple[QQC2CMessage, ChannelMessage] | None:
-        try:
-            message = QQC2CMessage.from_event(payload)
-        except ValueError as exc:
-            logger.warning("qq.c2c.invalid_payload error={}", exc)
-            return None
+    def _parse(self, payload: dict[str, Any]) -> QQC2CMessage:
+        return QQC2CMessage.from_event(payload)
 
-        if self._deduper.seen(message.message_id):
-            logger.info("qq.c2c.duplicate message_id={}", message.message_id)
-            return None
+    def _requester(self, message: QQC2CMessage) -> Requester:
+        return Requester(scope="c2c", sender_id=message.user_openid)
 
-        if not self._policy.user_allowed(message.user_openid):
-            logger.warning(
-                "qq.c2c.blocked user_openid={} reason=not_in_allow_users",
-                message.user_openid,
-            )
-            return None
+    def _allowed(self, message: QQC2CMessage, requester: Requester) -> bool:
+        # Admins are let through even when they are not on allow_users.
+        if self._policy.user_allowed(message.user_openid) or self._is_admin(requester):
+            return True
+        logger.warning(
+            "qq.c2c.blocked user_openid={} reason=not_in_allow_users",
+            message.user_openid,
+        )
+        return False
 
-        channel_message = build_c2c_channel_message(
+    def _build(self, message: QQC2CMessage, *, allow_command: bool) -> ChannelMessage:
+        return build_c2c_channel_message(
             self._channel_name,
             message,
-            allow_command=self._policy.may_run_command(
-                scope="c2c", sender_id=message.user_openid
-            ),
+            allow_command=allow_command,
             suppress_direct_output=self._suppress_direct_output,
         )
-        remember_session(
-            self._state,
-            session_id=channel_message.session_id,
-            message_id=message.message_id,
-            timestamp=message.timestamp,
-        )
-        return message, channel_message
 
 
 def build_c2c_channel_message(
@@ -88,7 +64,7 @@ def build_c2c_channel_message(
         }
     }
 
-    if text.startswith(","):
+    if strip_command(text) is not None:
         if allow_command:
             return ChannelMessage(
                 session_id=session_id,
@@ -99,19 +75,22 @@ def build_c2c_channel_message(
                 is_active=True,
                 context=context,
             )
-        logger.warning(
-            "qq.c2c.command_denied user_openid={} reason=not_admin_user",
-            message.user_openid,
-        )
+        if not is_admin_command(text):
+            logger.warning(
+                "qq.c2c.command_denied user_openid={} reason=not_admin_user",
+                message.user_openid,
+            )
 
     payload = {
-        "message": message.content,
+        "message": text,
         "message_id": message.message_id,
         "type": "text" if not message.attachments else "attachment",
         "sender_id": message.user_openid,
         "date": message.timestamp,
         "attachments": attachment_payloads(message.attachments),
         "quoted_messages": msg_element_payloads(message.msg_elements),
+        "message_type": message.message_type,
+        "ark_data": message.ark_data,
     }
     return ChannelMessage(
         session_id=session_id,
@@ -130,11 +109,6 @@ def build_c2c_channel_message(
 def resolve_c2c_openid(
     *, channel_name: str, session_id: str, chat_id: str
 ) -> str | None:
-    if chat_id.startswith("c2c:"):
-        openid = chat_id.removeprefix("c2c:").strip()
-        return openid or None
-    prefix = f"{channel_name}:c2c:"
-    if session_id.startswith(prefix):
-        openid = session_id.removeprefix(prefix).strip()
-        return openid or None
-    return None
+    return resolve_scoped_openid(
+        "c2c", channel_name=channel_name, session_id=session_id, chat_id=chat_id
+    )

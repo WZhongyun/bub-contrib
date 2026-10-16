@@ -123,6 +123,8 @@ class QQGroupMessage:
     message_type: int | None = None
     """0=text, 3=ARK card, 101=parallel, 102=chat record, 103=quote."""
     msg_elements: tuple[QQMsgElement, ...] = ()
+    ark_data: dict[str, Any] | None = None
+    """Structured card payload when ``message_type`` is 3."""
 
     @classmethod
     def from_event(cls, payload: dict[str, Any]) -> QQGroupMessage:
@@ -166,6 +168,7 @@ class QQGroupMessage:
             member_role=_optional_str(author.get("member_role")),
             message_type=_optional_int(data.get("message_type")),
             msg_elements=_msg_elements_from(data),
+            ark_data=_ark_data_from(data),
         )
 
 
@@ -183,6 +186,8 @@ class QQC2CMessage:
     message_type: int | None = None
     """0=text, 3=ARK card, 101=parallel, 102=chat record, 103=quote."""
     msg_elements: tuple[QQMsgElement, ...] = ()
+    ark_data: dict[str, Any] | None = None
+    """Structured card payload when ``message_type`` is 3."""
 
     @classmethod
     def from_event(cls, payload: dict[str, Any]) -> QQC2CMessage:
@@ -214,7 +219,13 @@ class QQC2CMessage:
             sequence=_optional_int(payload.get("s")),
             message_type=_optional_int(data.get("message_type")),
             msg_elements=_msg_elements_from(data),
+            ark_data=_ark_data_from(data),
         )
+
+
+def _ark_data_from(data: dict[str, Any]) -> dict[str, Any] | None:
+    raw = data.get("ark_data")
+    return dict(raw) if isinstance(raw, dict) else None
 
 
 def _required_str(value: Any, field_name: str) -> str:

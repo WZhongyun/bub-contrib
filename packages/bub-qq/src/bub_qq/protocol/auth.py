@@ -61,6 +61,18 @@ class QQTokenProvider:
             self._token = await self._request_new_token()
             return self._token.value
 
+    def invalidate(self, rejected_token: str | None = None) -> None:
+        """Drop the cached token (e.g. after a 401) so the next call refetches.
+
+        With ``rejected_token``, only drop it if it is still the cached one,
+        so concurrent 401s do not throw away a token another call just got.
+        """
+
+        if rejected_token is None or (
+            self._token is not None and self._token.value == rejected_token
+        ):
+            self._token = None
+
     async def _request_new_token(self) -> QQAccessToken:
         if not self._config.appid or not self._config.secret:
             raise QQAuthError("qq appid/secret is empty")

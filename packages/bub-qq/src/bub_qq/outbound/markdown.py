@@ -61,8 +61,12 @@ async def send_with_markdown_fallback(
     msg_seq: int,
     send_text: MarkdownSender,
     send_markdown: MarkdownSender | None,
+    force_markdown: bool = False,
 ) -> dict[str, object]:
-    if send_markdown is not None and looks_like_markdown(content):
+    use_markdown = send_markdown is not None and (
+        force_markdown or looks_like_markdown(content)
+    )
+    if use_markdown:
         try:
             return await send_markdown(
                 content=content,
@@ -70,7 +74,7 @@ async def send_with_markdown_fallback(
                 msg_seq=msg_seq,
             )
         except QQOpenAPIError as exc:
-            if not is_markdown_fallback_error(exc):
+            if force_markdown or not is_markdown_fallback_error(exc):
                 raise
             logger.warning(
                 "qq.send markdown_fallback code={} msg={}",

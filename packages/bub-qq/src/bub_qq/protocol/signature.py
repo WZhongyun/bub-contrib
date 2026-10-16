@@ -6,6 +6,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 def _seed_from_secret(secret: str) -> bytes:
+    if not secret:
+        raise ValueError("qq secret is empty")
     seed = secret
     while len(seed) < 32:
         seed = seed * 2

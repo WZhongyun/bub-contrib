@@ -4,6 +4,7 @@ import asyncio
 
 from bub.channels.message import ChannelMessage
 
+from bub_qq import security
 from bub_qq.inbound.c2c import QQC2CInboundService
 from bub_qq.outbound.c2c import QQC2CSendService
 from bub_qq.protocol.errors import QQKnownOpenAPIError
@@ -161,6 +162,7 @@ def test_c2c_inbound_includes_quoted_messages_in_payload() -> None:
     assert content["quoted_messages"] == [
         {"message": "原始消息", "sender_name": "Bob"}
     ]
+    assert content["message_type"] == 103
 
 
 def test_c2c_inbound_service_drops_users_outside_allowlist() -> None:
@@ -179,7 +181,8 @@ def test_c2c_inbound_service_gates_comma_commands_by_admin_users() -> None:
         channel_name="qq",
         deduper=QQInboundDeduper(16),
         state=_state(),
-        policy=QQAccessPolicy(admin_users=frozenset({"user-openid"})),
+        policy=QQAccessPolicy(),
+        is_admin=lambda requester: requester.identity == "c2c:user-openid",
     )
     plain_service = QQC2CInboundService(
         channel_name="qq",
@@ -198,6 +201,34 @@ def test_c2c_inbound_service_gates_comma_commands_by_admin_users() -> None:
     assert plain_parsed is not None
     assert plain_parsed[1].kind == "normal"
     assert ",status" in plain_parsed[1].content
+
+
+def test_c2c_commands_follow_bub_command_prefix(monkeypatch) -> None:
+    monkeypatch.setattr(security, "command_prefix", lambda: "/")
+    service = QQC2CInboundService(
+        channel_name="qq",
+        deduper=QQInboundDeduper(16),
+        state=_state(),
+        policy=QQAccessPolicy(),
+        is_admin=lambda requester: requester.identity == "c2c:user-openid",
+    )
+
+    slash = service.parse_inbound(_payload(content="/status"))
+    comma = service.parse_inbound(_payload(message_id="message-2", content=",status"))
+
+    assert slash is not None and slash[1].kind == "command"
+    assert comma is not None and comma[1].kind == "normal"
+
+
+def test_c2c_admin_bypasses_allow_users() -> None:
+    service = QQC2CInboundService(
+        channel_name="qq",
+        deduper=QQInboundDeduper(16),
+        state=_state(),
+        policy=QQAccessPolicy(allow_users=frozenset({"someone-else"})),
+        is_admin=lambda requester: requester.sender_id == "user-openid",
+    )
+    assert service.parse_inbound(_payload(content="hi")) is not None
 
 
 def test_c2c_send_service_sends_using_session_context() -> None:
@@ -513,8 +544,18 @@ def test_c2c_send_service_swallows_openapi_errors() -> None:
             )
         )
 
-        assert result is None
+        assert result == {
+            "status": "failed",
+            "error_code": 22009,
+            "error": "msg limit exceed",
+        }
         assert openapi.calls == 1
+        assert (
+            state.latest_sequence_by_session_and_msg_id.get(
+                ("qq:c2c:user-openid", "message-1"), 0
+            )
+            == 0
+        )
 
     asyncio.run(_run())
 

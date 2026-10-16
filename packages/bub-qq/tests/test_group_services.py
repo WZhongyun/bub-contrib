@@ -150,6 +150,21 @@ def test_group_inbound_parses_at_message_as_active() -> None:
     )
 
 
+def test_group_inbound_includes_message_type_and_ark_data() -> None:
+    payload = _payload()
+    data = payload["d"]
+    assert isinstance(data, dict)
+    data["message_type"] = 3
+    data["ark_data"] = {"template_id": 23}
+
+    parsed = _service(_state()).parse_inbound(payload)
+
+    assert parsed is not None
+    content = json.loads(parsed[1].content)
+    assert content["message_type"] == 3
+    assert content["ark_data"] == {"template_id": 23}
+
+
 def test_group_inbound_unmentioned_message_is_still_active() -> None:
     state = _state()
     service = _service(state)
@@ -197,24 +212,27 @@ def test_group_inbound_parses_member_role_into_payload() -> None:
     assert payload["sender_role"] == "admin"
 
 
-def test_group_inbound_gates_comma_commands_by_role() -> None:
-    admin_parsed = _service(_state()).parse_inbound(
-        _payload(content="<@bot-openid> ,status", member_role="admin")
+def test_group_inbound_gates_comma_commands_by_admin_not_role() -> None:
+    def admin(requester) -> bool:
+        return requester.identity == "group:group-openid:member-openid"
+
+    owner_parsed = _service(_state()).parse_inbound(
+        _payload(content="<@bot-openid> ,status", member_role="owner")
     )
-    member_parsed = _service(_state()).parse_inbound(
-        _payload(content="<@bot-openid> ,status", member_role="member")
-    )
-    allowlisted_parsed = _service(
-        _state(), QQAccessPolicy(admin_users=frozenset({"member-openid"}))
+    listed_parsed = QQGroupInboundService(
+        channel_name="qq",
+        deduper=QQInboundDeduper(16),
+        state=_state(),
+        policy=QQAccessPolicy(),
+        is_admin=admin,
     ).parse_inbound(_payload(content="<@bot-openid> ,status", member_role="member"))
 
-    assert admin_parsed is not None
-    assert admin_parsed[1].kind == "command"
-    assert member_parsed is not None
-    assert member_parsed[1].kind == "normal"
-    assert ",status" in json.loads(member_parsed[1].content)["message"]
-    assert allowlisted_parsed is not None
-    assert allowlisted_parsed[1].kind == "command"
+    # QQ group owners are not trusted unless the deployer lists them.
+    assert owner_parsed is not None
+    assert owner_parsed[1].kind == "normal"
+    assert ",status" in json.loads(owner_parsed[1].content)["message"]
+    assert listed_parsed is not None
+    assert listed_parsed[1].kind == "command"
 
 
 def test_strip_mention_text_removes_bot_and_keeps_others() -> None:
@@ -473,3 +491,54 @@ def test_interaction_query_payload_and_claw_cfg() -> None:
     assert event["id"] == "interaction-1"
     assert event["type"] == 2001
     assert build_claw_cfg()["require_mention"] == "always"
+
+
+def test_group_wake_mention_only_activates_on_mentions() -> None:
+    def service(wake_on: str) -> QQGroupInboundService:
+        return QQGroupInboundService(
+            channel_name="qq",
+            deduper=QQInboundDeduper(16),
+            state=_state(),
+            policy=QQAccessPolicy(),
+            wake_on=wake_on,
+        )
+
+    chatter = _payload(event_type="GROUP_MESSAGE_CREATE", content="lunch?", mentions=[])
+    mention = _payload(message_id="m2", content="<@bot-openid> hi")
+
+    assert service("all").parse_inbound(chatter)[1].is_active is True
+    assert service("mention").parse_inbound(chatter)[1].is_active is False
+    assert service("mention").parse_inbound(mention)[1].is_active is True
+
+
+def test_group_send_replies_to_the_triggering_message() -> None:
+    from bub_qq.outbound.media import build_outbound_context
+    from bub_qq.session import remember_session
+
+    async def _run() -> None:
+        state = _state()
+        for message_id in ("trigger", "newer"):
+            remember_session(
+                state,
+                session_id="qq:group:group-openid",
+                message_id=message_id,
+                timestamp="2099-01-01T00:00:00+00:00",
+            )
+        openapi = GroupOpenAPIStub()
+        service = QQGroupSendService(
+            channel_name="qq", receive_mode="websocket", state=state, openapi=openapi
+        )
+
+        await service.send(
+            ChannelMessage(
+                session_id="qq:group:group-openid",
+                chat_id="group:group-openid",
+                content="answer",
+                channel="qq",
+                context=build_outbound_context(reply_to="trigger"),
+            )
+        )
+
+        assert openapi.calls[0]["msg_id"] == "trigger"
+
+    asyncio.run(_run())

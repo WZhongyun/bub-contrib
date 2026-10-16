@@ -22,7 +22,6 @@ from bub_qq.outbound.send_flow import normalize_outbound_content
 from bub_qq.protocol.models import QQC2CMessage
 from bub_qq.protocol.models import QQGroupMessage
 from bub_qq.security import denied_tool_reason
-from bub_qq.security import evaluate_tool_call
 from bub_qq.security import parse_id_list
 from bub_qq.session import QQSessionState
 
@@ -236,8 +235,10 @@ def test_system_prompt_hook_direct_mode(monkeypatch) -> None:
 
     result = plugin.system_prompt("hi", {"qq": {"scope": "group"}})
 
-    assert result == plugin.DIRECT_REPLY_PROMPT
+    assert result is not None
+    assert plugin.DIRECT_REPLY_PROMPT in result
     assert "<no_reply/>" in result
+    assert "<qq_workspace>" in result
 
 
 def test_system_prompt_hook_tool_mode(monkeypatch) -> None:
@@ -245,17 +246,34 @@ def test_system_prompt_hook_tool_mode(monkeypatch) -> None:
 
     result = plugin.system_prompt("hi", {"qq": {"scope": "group"}})
 
-    assert result == plugin.TOOL_REPLY_PROMPT
+    assert result is not None
+    assert plugin.TOOL_REPLY_PROMPT in result
     assert "qq.send" in result
+    assert "<qq_workspace>" in result
 
 
-def test_reply_tool_exempt_from_tool_policy() -> None:
-    config = _config(admin_users="", denied_tools="", group_tool_policy="locked")
-    qq_state = {"scope": "group", "sender_id": "member-1", "sender_role": "member"}
+def test_reply_tool_exempt_from_tool_policy(tmp_path) -> None:
+    from bub.hooks.interception import ToolCall
 
-    assert evaluate_tool_call(config, qq_state, "qq.send") is None
-    assert evaluate_tool_call(config, qq_state, "qq_send") is None
-    assert evaluate_tool_call(config, qq_state, "fs.read") is not None
+    from bub_qq.guard import Requester
+    from bub_qq.guard import evaluate
+
+    config = _config(
+        admin_users="",
+        denied_tools="",
+        group_tool_policy="locked",
+        c2c_access="admin_users",
+        group_shell="approval",
+    )
+    member = Requester(scope="group", sender_id="member-1", group_openid="g")
+
+    def decide(tool: str) -> str:
+        call = ToolCall(run_id="r", tool=tool, arguments={"content": "hi"})
+        return evaluate(call, member, config=config, workspace=tmp_path).action
+
+    assert decide("qq.send") == "allow"
+    assert decide("qq_send") == "allow"
+    assert decide("fs.read") == "deny"
 
 
 def test_denied_tool_reason_matches_model_facing_aliases() -> None:
@@ -401,6 +419,122 @@ def test_qq_send_tool_sends_via_channel(monkeypatch) -> None:
     assert sent.content == "hello group"
 
 
+def test_qq_send_tool_attaches_at_user_ids(monkeypatch) -> None:
+    monkeypatch.setattr(bub, "ensure_config", lambda cls: _config(reply_mode="tool"))
+    channel = FakeChannel({"id": "at-1"})
+    runtime.set_active_channel(channel)
+    try:
+        result = asyncio.run(
+            tools.qq_send.run(
+                content="请看下",
+                at_user_ids=["member-openid"],
+                context=_tool_context(
+                    {
+                        "scope": "group",
+                        "group_openid": "group-openid",
+                        "sender_id": "member-openid",
+                        "session_id": "qq:group:group-openid",
+                    }
+                ),
+            )
+        )
+    finally:
+        runtime.set_active_channel(None)
+
+    text = tools.qq_send.render(result)
+    assert text == "Sent."
+    outbound = channel.messages[0].context["_qq_outbound"]
+    assert outbound["at_user_ids"] == ["member-openid"]
+
+
+def test_qq_send_tool_attaches_media_url(monkeypatch) -> None:
+    monkeypatch.setattr(bub, "ensure_config", lambda cls: _config(reply_mode="tool"))
+    channel = FakeChannel({"id": "media-1"})
+    runtime.set_active_channel(channel)
+    try:
+        result = asyncio.run(
+            tools.qq_send.run(
+                content="",
+                media_url="https://example.com/pic.png",
+                context=_tool_context(
+                    {
+                        "scope": "group",
+                        "group_openid": "group-openid",
+                        "sender_id": "member-openid",
+                        "session_id": "qq:group:group-openid",
+                    }
+                ),
+            )
+        )
+    finally:
+        runtime.set_active_channel(None)
+
+    text = tools.qq_send.render(result)
+    assert text == "Sent."
+    sent = channel.messages[0]
+    outbound = sent.context.get("_qq_outbound")
+    assert isinstance(outbound, dict)
+    assert outbound["media_url"] == "https://example.com/pic.png"
+    assert outbound["file_type"] == 1
+
+
+def test_qq_send_tool_rejects_media_path_outside_workspace(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(bub, "ensure_config", lambda cls: _config(reply_mode="tool"))
+    channel = FakeChannel({"id": "x"})
+    runtime.set_active_channel(channel)
+    context = _tool_context(
+        {
+            "scope": "group",
+            "group_openid": "group-openid",
+            "sender_id": "member-openid",
+            "session_id": "qq:group:group-openid",
+        }
+    )
+    context.state["_runtime_workspace"] = str(tmp_path)
+    try:
+        result = asyncio.run(
+            tools.qq_send.run(
+                content="",
+                media_path="/etc/hosts",
+                context=context,
+            )
+        )
+    finally:
+        runtime.set_active_channel(None)
+
+    text = tools.qq_send.render(result)
+    assert "outbox" in text
+    assert channel.messages == []
+
+
+def test_qq_send_tool_rejects_bad_media_url(monkeypatch) -> None:
+    monkeypatch.setattr(bub, "ensure_config", lambda cls: _config(reply_mode="tool"))
+    channel = FakeChannel({"id": "x"})
+    runtime.set_active_channel(channel)
+    try:
+        result = asyncio.run(
+            tools.qq_send.run(
+                content="",
+                media_url="ftp://example.com/pic.png",
+                context=_tool_context(
+                    {
+                        "scope": "c2c",
+                        "sender_id": "user-openid",
+                        "session_id": "qq:c2c:user-openid",
+                    }
+                ),
+            )
+        )
+    finally:
+        runtime.set_active_channel(None)
+
+    text = tools.qq_send.render(result)
+    assert text.startswith("Not sent")
+    assert channel.messages == []
+
+
 def test_qq_send_tool_reports_statuses(monkeypatch) -> None:
     monkeypatch.setattr(bub, "ensure_config", lambda cls: _config(reply_mode="tool"))
     qq_state = {
@@ -413,9 +547,19 @@ def test_qq_send_tool_reports_statuses(monkeypatch) -> None:
         (
             None,
             "not_sent",
-            "Not sent: the QQ channel skipped or failed this send"
-            " (empty content, closed reply window, or platform error;"
-            " see gateway logs). Do not retry with identical content.",
+            (
+                "Not sent: the QQ channel skipped this send"
+                " (empty content, closed reply window, or no remaining passive replies;"
+                " see gateway logs). Do not retry with identical content."
+            ),
+        ),
+        (
+            {"status": "failed", "error_code": 22009, "error": "msg limit exceed"},
+            "not_sent",
+            (
+                "Not sent: QQ OpenAPI error code=22009 msg limit exceed."
+                " Do not retry with identical content."
+            ),
         ),
         (
             {"status": "pending_audit"},
@@ -437,6 +581,72 @@ def test_qq_send_tool_reports_statuses(monkeypatch) -> None:
         assert result["status"] == expected_status
         assert tools.qq_send.render(result) == expected_text
         assert channel.messages[0].chat_id == "c2c:user-openid"
+
+
+def test_qq_send_tool_explains_media_upload_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(bub, "ensure_config", lambda cls: _config(reply_mode="tool"))
+    channel = FakeChannel(
+        {
+            "status": "failed",
+            "error_code": 850027,
+            "error": "富媒体文件上传超时",
+        }
+    )
+    runtime.set_active_channel(channel)
+    try:
+        result = asyncio.run(
+            tools.qq_send.run(
+                content="",
+                media_url="https://i.imgur.com/pic.png",
+                context=_tool_context(
+                    {
+                        "scope": "group",
+                        "group_openid": "group-openid",
+                        "sender_id": "member-openid",
+                        "session_id": "qq:group:group-openid",
+                    }
+                ),
+            )
+        )
+    finally:
+        runtime.set_active_channel(None)
+
+    text = tools.qq_send.render(result)
+    assert "850027" in text
+    assert "media_path" in text
+    assert "Do not retry the same failed payload" in text
+
+
+def test_qq_send_tool_explains_media_download_failure(monkeypatch) -> None:
+    monkeypatch.setattr(bub, "ensure_config", lambda cls: _config(reply_mode="tool"))
+    channel = FakeChannel(
+        {
+            "status": "failed",
+            "error": "failed to download media_url (https://i.imgur.com/pic.png): 404",
+        }
+    )
+    runtime.set_active_channel(channel)
+    try:
+        result = asyncio.run(
+            tools.qq_send.run(
+                content="",
+                media_url="https://i.imgur.com/pic.png",
+                context=_tool_context(
+                    {
+                        "scope": "group",
+                        "group_openid": "group-openid",
+                        "sender_id": "member-openid",
+                        "session_id": "qq:group:group-openid",
+                    }
+                ),
+            )
+        )
+    finally:
+        runtime.set_active_channel(None)
+
+    text = tools.qq_send.render(result)
+    assert "failed to download media_url" in text
+    assert "Do not retry the same media_url" in text
 
 
 def test_qq_send_tool_without_running_channel(monkeypatch) -> None:
