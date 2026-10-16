@@ -13,6 +13,7 @@ dependencies = [
     "bub-cursor",
     "bub-discord",
     "bub-dingtalk",
+    "bub-docker-env",
     "bub-dsh",
     "bub-env",
     "bub-extism",
@@ -47,6 +48,7 @@ bub-context-budget = { workspace = true }
 bub-cursor = { workspace = true }
 bub-discord = { workspace = true }
 bub-dingtalk = { workspace = true }
+bub-docker-env = { workspace = true }
 bub-dsh = { workspace = true }
 bub-env = { workspace = true }
 bub-extism = { workspace = true }
