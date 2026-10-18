@@ -1,6 +1,6 @@
 # bub-monty-env
 
-把 Bub code mode 的 `run_code` 放进 [Monty](https://github.com/pydantic/monty) 执行，取代默认的 Python 子进程。Monty 是用 Rust 写的沙箱化 Python 解释器。插件通过 Bub 的 `provide_environment` hook 生效，同时提供 mixin 和包装函数，可以把 Monty 版 `run_code` 叠加到任意其他执行环境（Docker、本地沙箱等）上。
+把 Bub code mode 的 `run_code` 放进 [Monty](https://github.com/pydantic/monty) 执行，取代默认的 Python 子进程。Monty 是用 Rust 写的沙箱化 Python 解释器。插件的 `provide_environment` hook 会包装其他插件提供的执行环境（Docker、本地沙箱，或 Bub 的宿主执行环境），只替换 `run_code`。另外也提供 mixin 和包装函数，方便用在你自己的执行环境上。
 
 代码每次调用沙箱外的东西，Monty 都会挂起执行，把调用交给 Bub；Bub 执行完再恢复代码。因此：
 
@@ -32,7 +32,7 @@ monty_env:
 
 | 键 | 默认值 | 作用 |
 | --- | --- | --- |
-| `sessions` | `["*"]` | 匹配 session id（`<channel>:<chat id>`）的 glob；其他会话使用 Bub 的宿主执行环境 |
+| `sessions` | `["*"]` | 匹配 session id（`<channel>:<chat id>`）的 glob；其他会话使用其他插件提供的执行环境，不做包装 |
 | `filesystem` | `read-write` | 代码的文件访问：`read-write`、`read-only` 或 `none` |
 | `max_memory_mb` | `256` | 每次运行的堆内存上限；`null` 表示不限 |
 | `max_recursion_depth` | `1000` | 最大调用栈深度 |
@@ -43,27 +43,23 @@ monty_env:
 
 ## 与其他执行环境组合
 
-插件提供的是 `MontyEnvironment`：Bub 的宿主执行环境加上 Monty 版 `run_code`。Bub 只采用第一个插件提供的执行环境，所以如果想让 `bash` 跑在 Docker 或本地沙箱里、`run_code` 跑在 Monty 里，需要在自己的插件中把 Monty 叠加到那个执行环境上：
+插件的 hook 最先运行（`tryfirst`），通过 pluggy 的 `subset_hook_caller` 向其他插件获取该会话的执行环境，再用 `create_monty_environment` 包装。装了 `bub-docker-env` 或 `bub-sandbox-env` 时，`bash` 和 `fs.*` 仍在 Docker 或沙箱里运行，`run_code` 跑在 Monty 里，文件访问也走那个执行环境。没有其他插件提供执行环境时，包装 Bub 的宿主执行环境。不在 `sessions` 范围内的会话直接使用其他插件提供的执行环境，不做包装。
+
+用在你自己的执行环境上：
 
 ```python
-import bub
-from bub import hookimpl
 from bub_monty_env import MontyCodeMixin, MontyOptions, create_monty_environment
-from bub_sandbox_env.config import SandboxEnvConfig
-from bub_sandbox_env.environment import SandboxEnvironment
-
 
 # 包装实例：除 run_code 外全部委托给它，关闭包装时也会关闭它。
-@hookimpl
-def provide_environment(session_id, workspace):
-    config = bub.ensure_config(SandboxEnvConfig)
-    return create_monty_environment(SandboxEnvironment(config, workspace=workspace))
+environment = create_monty_environment(MyEnvironment(...), MontyOptions(filesystem="read-only"))
 
 
 # 或者混入类：mixin 放在前面。
-class SandboxMontyEnvironment(MontyCodeMixin, SandboxEnvironment):
+class MyMontyEnvironment(MontyCodeMixin, MyEnvironment):
     monty_options = MontyOptions(filesystem="read-only")
 ```
+
+`MontyEnvironment` 是 Bub 的宿主执行环境加上 Monty 版 `run_code`。
 
 更底层的部件：`run_code_in_monty(pool, code, ...)` 在 `pydantic_monty.AsyncMonty` 池上实现 `Environment.run_code`；可以覆盖 `MontyCodeMixin.monty_os_handler()` 来改变代码能做的文件访问。
 

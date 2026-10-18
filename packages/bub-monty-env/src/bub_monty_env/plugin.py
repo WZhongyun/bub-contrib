@@ -2,29 +2,61 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import bub
 from bub import hookimpl
+from bub.builtin.environment import LocalEnvironment
 from bub.environment import Environment
 from loguru import logger
 
 from .config import MontyEnvConfig
-from .environment import MontyEnvironment
+from .environment import create_monty_environment
+
+if TYPE_CHECKING:
+    from bub.framework import BubFramework
 
 
-@hookimpl
-def provide_environment(session_id: str, workspace: Path) -> Environment | None:
-    """A host environment with Monty ``run_code`` for sessions matching ``monty_env.sessions``.
+class MontyEnvPlugin:
+    """Wrap the environment other plugins provide so its ``run_code`` runs in Monty."""
 
-    Other sessions get None, so Bub's host environment serves them.
-    """
+    def __init__(self, framework: BubFramework) -> None:
+        self.framework = framework
 
-    config = bub.ensure_config(MontyEnvConfig)
-    if not config.matches(session_id):
-        logger.debug("monty_env.session.host session_id={}", session_id)
-        return None
-    logger.info(
-        "monty_env.session session_id={} filesystem={}", session_id, config.filesystem
-    )
-    return MontyEnvironment(Path(workspace), options=config.options())
+    async def other_environment(self, session_id: str, workspace: Path) -> Environment:
+        """The environment the other plugins provide for the session, or a host one."""
+        provide = self.framework.plugin_manager.subset_hook_caller(
+            "provide_environment", remove_plugins=[self]
+        )
+        environment = provide(session_id=session_id, workspace=workspace)
+        if inspect.isawaitable(environment):
+            environment = await environment
+        if environment is None:
+            return LocalEnvironment(workspace)
+        if not isinstance(environment, Environment):
+            raise TypeError("hook.provide_environment must return Environment or None")
+        return environment
+
+    @hookimpl(tryfirst=True)
+    async def provide_environment(
+        self, session_id: str, workspace: Path
+    ) -> Environment | None:
+        """The other plugins' environment with Monty ``run_code``, for sessions matching ``monty_env.sessions``.
+
+        Other sessions get None, so the other plugins serve them unchanged.
+        """
+
+        config = bub.ensure_config(MontyEnvConfig)
+        if not config.matches(session_id):
+            logger.debug("monty_env.session.skip session_id={}", session_id)
+            return None
+        environment = await self.other_environment(session_id, Path(workspace))
+        logger.info(
+            "monty_env.session session_id={} wraps={} filesystem={}",
+            session_id,
+            type(environment).__name__,
+            config.filesystem,
+        )
+        return create_monty_environment(environment, config.options())

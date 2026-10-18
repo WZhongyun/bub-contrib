@@ -3,13 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import bub
+import pluggy
 import pytest
 from bub.builtin.codemode import CODE_TOOLS_STATE_KEY, run_code
 from bub.environment import ENVIRONMENT_STATE_KEY
 from bub.errors import BubError
 from bub.tools import ToolContext, tool
-from bub_monty_env import MontyEnvironment, plugin
+from bub.builtin.environment import LocalEnvironment
+from bub.hooks import BUB_HOOK_NAMESPACE, BubHookSpecs, hookimpl
+from bub.hooks.runtime import HookRuntime
+from bub_monty_env import MontyEnvironment, MontyWrappedEnvironment
 from bub_monty_env.config import MontyEnvConfig
+from bub_monty_env.plugin import MontyEnvPlugin
 
 
 @pytest.mark.parametrize(
@@ -42,14 +47,87 @@ def test_options_carry_limits() -> None:
     assert limits["max_suspensions"] == 5
 
 
-def test_provide_environment_follows_sessions(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        bub, "ensure_config", lambda cls: MontyEnvConfig(sessions=["qq:*"])
+class OtherEnvironment(LocalEnvironment):
+    pass
+
+
+class OtherPlugin:
+    """A plugin providing its own environment, like bub-docker-env or bub-sandbox-env."""
+
+    def __init__(self, sessions: str = "*") -> None:
+        self.sessions = sessions
+
+    @hookimpl
+    async def provide_environment(self, session_id, workspace):
+        if not session_id.startswith(self.sessions.rstrip("*")):
+            return None
+        return OtherEnvironment(workspace)
+
+
+class FakeFramework:
+    def __init__(self) -> None:
+        self.plugin_manager = pluggy.PluginManager(BUB_HOOK_NAMESPACE)
+        self.plugin_manager.add_hookspecs(BubHookSpecs)
+
+
+def make_runtime(*plugins) -> HookRuntime:
+    framework = FakeFramework()
+    # Registered first, like an entry point loaded before the others: tryfirst still wins.
+    framework.plugin_manager.register(MontyEnvPlugin(framework), name="monty-env")
+    for index, item in enumerate(plugins):
+        framework.plugin_manager.register(item, name=f"other-{index}")
+    return HookRuntime(framework.plugin_manager)
+
+
+@pytest.fixture
+def sessions(monkeypatch):
+    def set_sessions(patterns):
+        monkeypatch.setattr(
+            bub, "ensure_config", lambda cls: MontyEnvConfig(sessions=patterns)
+        )
+
+    set_sessions(["*"])
+    return set_sessions
+
+
+async def provide(runtime: HookRuntime, session_id: str, workspace: Path):
+    return await runtime.call_first(
+        "provide_environment", session_id=session_id, workspace=workspace
     )
-    assert plugin.provide_environment("cli:default", tmp_path) is None
-    environment = plugin.provide_environment("qq:group:g1", tmp_path)
-    assert isinstance(environment, MontyEnvironment)
-    assert environment.workspace == str(tmp_path)
+
+
+async def test_wraps_the_environment_other_plugins_provide(sessions, tmp_path) -> None:
+    environment = await provide(make_runtime(OtherPlugin()), "qq:g1", tmp_path)
+    try:
+        assert isinstance(environment, MontyWrappedEnvironment)
+        assert isinstance(environment.environment, OtherEnvironment)
+        output: list[str] = []
+        await environment.run_code(
+            "print(1 + 1)", tools=[], call_tool=None, write=output.append
+        )
+        assert output == ["2\n"]
+    finally:
+        await environment.close()
+
+
+async def test_wraps_a_host_environment_when_no_other_plugin_provides_one(
+    sessions, tmp_path
+) -> None:
+    environment = await provide(make_runtime(OtherPlugin("qq:*")), "cli:x", tmp_path)
+    try:
+        assert isinstance(environment, MontyWrappedEnvironment)
+        assert type(environment.environment) is LocalEnvironment
+        assert environment.workspace == str(tmp_path)
+    finally:
+        await environment.close()
+
+
+async def test_unmatched_sessions_keep_the_other_environment(
+    sessions, tmp_path
+) -> None:
+    sessions(["qq:*"])
+    environment = await provide(make_runtime(OtherPlugin()), "cli:x", tmp_path)
+    assert type(environment) is OtherEnvironment
 
 
 @tool(name="add")

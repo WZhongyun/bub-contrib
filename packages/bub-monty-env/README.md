@@ -1,6 +1,6 @@
 # bub-monty-env
 
-Runs Bub's code-mode `run_code` in [Monty](https://github.com/pydantic/monty), a sandboxed Python interpreter written in Rust, instead of a Python subprocess. It works through Bub's `provide_environment` hook, and also gives you a mixin and a wrapper to put Monty `run_code` on top of any other environment (Docker, local sandbox, ...).
+Runs Bub's code-mode `run_code` in [Monty](https://github.com/pydantic/monty), a sandboxed Python interpreter written in Rust, instead of a Python subprocess. Its `provide_environment` hook wraps whatever environment the other plugins provide (Docker, local sandbox, or Bub's host environment), so only `run_code` changes. A mixin and a wrapper function are also available for your own environments.
 
 Monty suspends the code at every call that leaves the sandbox and hands it to Bub, which runs it and resumes the code. So:
 
@@ -32,7 +32,7 @@ monty_env:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `sessions` | `["*"]` | Globs over session ids (`<channel>:<chat id>`); others keep Bub's host environment |
+| `sessions` | `["*"]` | Globs over session ids (`<channel>:<chat id>`); others keep the environment other plugins provide, unwrapped |
 | `filesystem` | `read-write` | File access from the code: `read-write`, `read-only` or `none` |
 | `max_memory_mb` | `256` | Heap limit per run; `null` for none |
 | `max_recursion_depth` | `1000` | Maximum call stack depth |
@@ -43,28 +43,24 @@ The run time limit is `run_code`'s own `timeout_seconds`.
 
 ## Combining with other environments
 
-The plugin provides `MontyEnvironment`: Bub's host environment with Monty `run_code`. Bub uses the first environment a plugin provides, so to run `bash` in Docker or a local sandbox and `run_code` in Monty, put Monty on top of that environment in your own plugin:
+The plugin's hook runs first (`tryfirst`), asks the other plugins for the session's environment (pluggy's `subset_hook_caller`), and wraps it with `create_monty_environment`. With `bub-docker-env` or `bub-sandbox-env` installed, `bash` and `fs.*` keep running in Docker or the sandbox, and `run_code` runs in Monty with file access through that environment. When no other plugin provides one, it wraps Bub's host environment. Sessions outside `sessions` get the other plugins' environment unchanged.
+
+For your own environments:
 
 ```python
-import bub
-from bub import hookimpl
 from bub_monty_env import MontyCodeMixin, MontyOptions, create_monty_environment
-from bub_sandbox_env.config import SandboxEnvConfig
-from bub_sandbox_env.environment import SandboxEnvironment
-
 
 # Wrap an instance: everything but run_code is delegated to it, and closing the
 # wrapper closes it.
-@hookimpl
-def provide_environment(session_id, workspace):
-    config = bub.ensure_config(SandboxEnvConfig)
-    return create_monty_environment(SandboxEnvironment(config, workspace=workspace))
+environment = create_monty_environment(MyEnvironment(...), MontyOptions(filesystem="read-only"))
 
 
 # Or mix into a class: the mixin goes first.
-class SandboxMontyEnvironment(MontyCodeMixin, SandboxEnvironment):
+class MyMontyEnvironment(MontyCodeMixin, MyEnvironment):
     monty_options = MontyOptions(filesystem="read-only")
 ```
+
+`MontyEnvironment` is Bub's host environment with Monty `run_code`.
 
 Lower-level pieces: `run_code_in_monty(pool, code, ...)` implements `Environment.run_code` on a `pydantic_monty.AsyncMonty` pool, and `MontyCodeMixin.monty_os_handler()` can be overridden to change what file access the code gets.
 

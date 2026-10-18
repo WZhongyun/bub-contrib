@@ -27,7 +27,7 @@ class MontyEnvConfig(bub.Settings):
         description=(
             "Session id glob patterns whose run_code runs in Monty. Session ids look"
             " like '<channel>:<chat id>', so 'qq:*' matches only QQ chats. Other"
-            " sessions keep Bub's host environment."
+            " sessions keep the environment other plugins provide, unwrapped."
         ),
     )
     filesystem: Filesystem = Field(
