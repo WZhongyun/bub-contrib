@@ -87,6 +87,8 @@ We welcome experimental, niche, or work-in-progress plugins, as long as they are
 
 If you are submitting a plugin, please be prepared to maintain it or help find a new maintainer if you become unavailable.
 
+[Landing](https://getlanding.dev) posts advisory reviews on non-draft PRs from this repository, responds to `/landing` commands and failed native workflows, and can open dependency-update draft PRs weekly or on request.
+
 ---
 ## License
 
