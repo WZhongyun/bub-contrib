@@ -22,7 +22,7 @@ from typing import Literal, NotRequired, TypedDict, final
 import aiohttp
 import bub
 from bub.channels.message import ChannelMessage
-from bub.tools import ToolContext, tool
+from bub.core.tools import ToolContext, tool
 
 from .config import QQConfig
 from .outbound.media import MediaSpec
@@ -251,3 +251,6 @@ def qq_version() -> str:
         return f"bub-qq {package_version('bub-qq')}"
     except PackageNotFoundError:
         return "bub-qq (version unknown: package metadata not found)"
+
+
+TOOLS = [qq_send, qq_fetch_attachment, qq_version]

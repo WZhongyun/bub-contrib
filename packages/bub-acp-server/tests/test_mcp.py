@@ -17,9 +17,8 @@ from acp.schema import (
     SseMcpServer,
     TextContentBlock,
 )
-from bub.builtin.agent import Agent
+from bub.builtin.agent import BubAgent
 from bub.framework import BubFramework
-from bub.tools import REGISTRY
 from bub_mcp import plugin as mcp_plugin
 
 from bub_acp_server.agent import BubACPAgent
@@ -172,8 +171,8 @@ async def test_capabilities_and_session_tool_isolation(framework, clients, tmp_p
     agent = make_agent(framework)
     caps = (await agent.initialize(1)).agent_capabilities.mcp_capabilities
     assert caps.http is True and caps.sse is True
-    original = REGISTRY.copy()
-    ordinary = Agent(framework)
+    original = framework.get_tools()
+    ordinary = BubAgent(framework)
     first = await agent.new_session(cwd=str(tmp_path), mcp_servers=[stdio("first")])
     second = await agent.new_session(cwd=str(tmp_path), mcp_servers=[stdio("second")])
     empty = await agent.new_session(cwd=str(tmp_path))
@@ -184,7 +183,7 @@ async def test_capabilities_and_session_tool_isolation(framework, clients, tmp_p
         assert len(clients[1].calls) == 1
         assert "mcp.shared_echo" not in await runtime_tools(agent, empty.session_id)
         assert "mcp.shared_echo" not in ordinary.tools
-        assert REGISTRY == original
+        assert framework.get_tools() == original
         await agent.close_session(first.session_id)
         assert clients[0].closed and not clients[1].closed
         await call_echo(agent, second.session_id)
@@ -197,21 +196,19 @@ async def test_capabilities_and_session_tool_isolation(framework, clients, tmp_p
 async def test_model_receives_only_current_session_mcp_tools(
     framework, clients, tmp_path, monkeypatch
 ):
-    from bub.builtin.model_runner import ModelRunner
-    from bub.streaming import AsyncStreamEvents, StreamEvent
+    from bub import hookimpl
+    from bub.hooks.interception import LLMCallDecision
 
     seen = []
 
-    def run(self, *, system_prompt, **kwargs):
-        seen.append(system_prompt or "")
+    class RecordSystemPrompt:
+        @hookimpl
+        def before_llm_call(self, request, state):
+            system = [m.text for m in request.messages if m.role == "system"]
+            seen.append("\n".join(system))
+            return LLMCallDecision.finish("ok")
 
-        async def events():
-            yield StreamEvent("text", {"delta": "ok"})
-            yield StreamEvent("final", {"text": "ok", "ok": True})
-
-        return AsyncStreamEvents(events())
-
-    monkeypatch.setattr(ModelRunner, "run", run)
+    framework.plugin_manager.register(RecordSystemPrompt(), name="record-system")
     agent = make_agent(framework)
     # Automatic session titles issue their own model call; this test asserts on
     # the tool surface of prompt turns only.

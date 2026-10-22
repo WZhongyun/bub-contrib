@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from apscheduler.schedulers.background import BackgroundScheduler
-from bub.tools import ToolContext
+from bub.core.tools import ToolContext
 
 from bub_schedule import tools
 
@@ -89,3 +89,16 @@ def test_schedule_list_filters_other_sessions(scheduler):
 def test_schedule_remove_unknown_job_raises(scheduler):
     with pytest.raises(RuntimeError, match="job not found: missing"):
         _run(tools.schedule_remove, "missing", context=_context(scheduler))
+
+
+def test_plugin_provides_the_schedule_tools():
+    from bub_schedule.plugin import ScheduleImpl
+
+    provided = {tool.name for tool in ScheduleImpl.provide_tools(None)}
+
+    assert provided == {
+        "schedule.add",
+        "schedule.remove",
+        "schedule.list",
+        "schedule.trigger",
+    }

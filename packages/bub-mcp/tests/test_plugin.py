@@ -4,9 +4,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from bub.builtin.agent import Agent
+from bub.builtin.agent import BubAgent
 from bub.framework import BubFramework
-from bub.tools import REGISTRY
 from bub_mcp import plugin
 
 
@@ -146,7 +145,6 @@ def test_bootstrap_discovers_remote_tools_without_global_registration(
     asyncio.run(start_channel())
 
     tool_name = "mcp.weather_get_forecast"
-    assert tool_name not in REGISTRY
     assert created_clients[0].entered is True
     assert created_clients[0].config == {
         "weather": {
@@ -170,7 +168,6 @@ def test_bootstrap_discovers_remote_tools_without_global_registration(
     asyncio.run(channel.stop())
 
     assert created_clients[0].exited is True
-    assert tool_name not in REGISTRY
 
 
 def test_channel_list_reads_current_config(monkeypatch, tmp_path: Path) -> None:
@@ -494,8 +491,7 @@ async def test_late_discovery_reaches_existing_agent_and_stop_restores_tools(
     framework.plugin_manager.register(mcp_plugin, name="mcp")
     builtin = framework.plugin_manager.get_plugin("builtin")
     agent = builtin._get_agent()
-    unrelated = Agent(framework)
-    original_registry = REGISTRY.copy()
+    unrelated = BubAgent(framework)
     original = plugin.Tool(name="mcp.weather_get_forecast", handler=lambda: "original")
     agent.tools[original.name] = original
     channel = mcp_plugin._manager
@@ -516,7 +512,6 @@ async def test_late_discovery_reaches_existing_agent_and_stop_restores_tools(
             event.data.get("text") async for event in events if event.kind == "final"
         ]
         assert output == ["forecast for Paris"]
-        assert REGISTRY == original_registry
         assert original.name not in unrelated.tools
         # Repeated binding must not save our own tool as the collision fallback.
         await framework.build_state({}, "test:weather")
@@ -533,7 +528,7 @@ async def test_mcp_binds_explicit_runtime_agent_without_changing_default(
     framework = BubFramework(config_file=tmp_path / "config.yml")
     framework.load_builtin_hooks()
     default = framework.plugin_manager.get_plugin("builtin")._get_agent()
-    embedded = Agent(framework, tools=[])
+    embedded = BubAgent(framework, tools=[])
     channel = plugin.MCPChannel()
     remote = plugin.Tool(name="mcp.embedded", handler=lambda: "ok")
     channel._servers["embedded"] = plugin.MCPServerState(tools=[remote], connected=True)
@@ -541,9 +536,17 @@ async def test_mcp_binds_explicit_runtime_agent_without_changing_default(
     await channel.bind_runtime_tools(framework, {"_runtime_agent": embedded})
     assert embedded.tools[remote.name] is remote
     assert remote.name not in default.tools
-    assert remote.name not in REGISTRY
     # Shutdown must not remove a replacement installed by someone else.
     replacement = plugin.Tool(name=remote.name, handler=lambda: "new")
     embedded.tools[remote.name] = replacement
     await channel.stop()
     assert embedded.tools[remote.name] is replacement
+
+
+def test_plugin_provides_only_the_server_list_tool(tmp_path: Path) -> None:
+    framework = BubFramework(config_file=tmp_path / "config.yml")
+    mcp_plugin = plugin.MCPPlugin(framework)
+    framework.plugin_manager.register(mcp_plugin, name="mcp")
+
+    # Remote tools are bound to agents as servers connect, never provided.
+    assert [tool.name for tool in framework.get_tools()] == ["mcp"]

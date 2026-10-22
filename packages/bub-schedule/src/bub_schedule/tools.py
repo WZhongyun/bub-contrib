@@ -9,7 +9,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from bub import tool
-from bub.tools import ToolContext
+from bub.core.tools import ToolContext
 from pydantic import BaseModel, Field
 
 from bub_schedule.jobs import run_scheduled_reminder
@@ -182,3 +182,6 @@ async def schedule_trigger(job_id: str, context: ToolContext) -> ScheduledJob:
         return _scheduled_job(job)
     except JobLookupError as exc:
         raise RuntimeError(f"job not found: {job_id}") from exc
+
+
+TOOLS = [schedule_add, schedule_remove, schedule_list, schedule_trigger]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -34,7 +35,18 @@ class FakeClient:
 
 class FakeFramework:
     def get_agent_hooks(self):
+        return SimpleNamespace(subscribe=lambda events: events)
+
+    def build_tape_context(self):
         return None
+
+    def get_tape_sidecars(self):
+        return ()
+
+    def get_tools(self):
+        from bub.builtin import tools
+
+        return tools.TOOLS
 
     def __init__(self) -> None:
         self.workspace = Path.cwd()
