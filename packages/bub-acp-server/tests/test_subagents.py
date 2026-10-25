@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from acp.schema import ClientCapabilities, TextContentBlock
 from bub.builtin import tools as builtin_tools
+from bub.errors import BubError, ErrorKind
 from bub.model_selection import ModelOptions
 from bub.streaming import AsyncStreamEvents, StreamEvent, StreamState
 from bub.core.tools import ToolContext
@@ -87,7 +88,10 @@ class StubAgent:
         self.events = events
         self.error = error
         self.calls: list[dict[str, Any]] = []
-        self.tools = {"subagent": BUILTIN_TOOLS["subagent"], "bash": BUILTIN_TOOLS["bash"]}
+        self.tools = {
+            "subagent": BUILTIN_TOOLS["subagent"],
+            "bash": BUILTIN_TOOLS["bash"],
+        }
 
     async def run_stream(self, **kwargs: Any) -> AsyncStreamEvents:
         self.calls.append(kwargs)
@@ -322,6 +326,30 @@ async def test_subagent_run_publishes_snapshot_output_and_progress() -> None:
     assert result["session_id"].startswith("temp/")
     assert runtime_agent.calls[0]["session_id"] == result["session_id"]
     assert runtime_agent.calls[0]["prompt"] == "delegate this"
+
+
+@pytest.mark.asyncio
+async def test_subagent_failed_tool_call_is_reported_as_failed() -> None:
+    client = FakeClient()
+    error = BubError(ErrorKind.TOOL, "command exited with code 1")
+    events = [
+        event
+        if event.kind != "tool_result"
+        else StreamEvent("tool_result", {"tool_results": [error]})
+        for event in child_events()
+    ]
+    _, _, (tool, context, version) = await make_tool_session(client, events)
+
+    await tool.run(context=context, **version)
+
+    [update] = [
+        payload["update"]
+        for payload in payloads(client)
+        if payload["type"] == "output"
+        and payload["update"]["sessionUpdate"] == "tool_call_update"
+    ]
+    assert update["status"] == "failed"
+    assert "command exited with code 1" in update["content"][0]["content"]["text"]
 
 
 @pytest.mark.asyncio

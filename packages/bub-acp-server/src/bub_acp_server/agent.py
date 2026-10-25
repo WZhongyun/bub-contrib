@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import bub
@@ -61,6 +61,7 @@ from acp.schema import (
 )
 from bub.channels.message import ChannelMessage, MediaItem, MediaType
 from bub.envelope import Envelope, content_of, field_of
+from bub.errors import BubError
 from bub.model_selection import ModelChoice, ModelOptions
 from bub.core.sidecars import sidecar_tape_name
 from bub.streaming import StreamEvent
@@ -435,18 +436,19 @@ class ACPStreamRouter:
                 state.next_tool_index += 1
             content = None
             is_context_compaction = tool.name == "tape.handoff"
+            status, raw_output = _tool_result_outcome(result)
             # The client may discard terminal output on release before this event.
             # Persist a text snapshot even when a live terminal was attached.
             if not is_context_compaction:
-                output = _stringify(result)
+                output = _stringify(raw_output)
                 content = [
                     ContentToolCallContent(content=TextContentBlock(text=output))
                 ]
             update = ToolCallProgress(
                 tool_call_id=tool.tool_id,
                 title="Context compacted" if is_context_compaction else tool.command,
-                status="completed",
-                raw_output=result,
+                status=status,
+                raw_output=raw_output,
                 content=content,
             )
             if is_context_compaction:
@@ -1069,12 +1071,13 @@ class BubACPAgent:
                             else:
                                 tool_id, title = f"tool-{next_index}", "tool"
                                 next_index += 1
+                            status, result = _tool_result_outcome(result)
                             await emitter.output(
                                 {
                                     "sessionUpdate": "tool_call_update",
                                     "toolCallId": tool_id,
                                     "title": title,
-                                    "status": "completed",
+                                    "status": status,
                                     "content": [
                                         {
                                             "type": "content",
@@ -1801,6 +1804,18 @@ def _clean_user_tape_content(content: str) -> str:
 
 def _list_payload(value: object) -> list[object]:
     return value if isinstance(value, list) else []
+
+
+def _tool_result_outcome(
+    result: object,
+) -> tuple[Literal["completed", "failed"], object]:
+    """Return a Bub tool result's ACP status and its JSON-safe output.
+
+    Bub carries a failed call's result as its `BubError`.
+    """
+    if isinstance(result, BubError):
+        return "failed", result.as_dict()
+    return "completed", result
 
 
 def _stringify(value: object) -> str:

@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 import typer
 from acp.schema import TextContentBlock
+from bub.errors import BubError, ErrorKind
 from bub.model_selection import ModelChoice, ModelOptions
 from bub.streaming import AsyncStreamEvents, StreamEvent, StreamState
 from bub.core.tape import (
@@ -978,6 +979,51 @@ async def test_bash_tool_call_attaches_acp_terminal_content(
     assert result_update.raw_output == "/workspace"
     assert len(result_update.content) == 1
     assert result_update.content[0].content.text == "/workspace"
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_call_is_reported_as_failed() -> None:
+    client = FakeClient()
+    router = ACPStreamRouter(client)
+    error = BubError(
+        ErrorKind.TOOL,
+        "Tool 'bash' execution failed.",
+        details={"error": "RuntimeError('command exited with code 1')"},
+    )
+
+    async def stream():
+        yield StreamEvent(
+            "tool_call",
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-ok",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+                    },
+                    {
+                        "id": "call-fail",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": '{"command":"exit 1"}',
+                        },
+                    },
+                ]
+            },
+        )
+        yield StreamEvent("tool_result", {"tool_results": ["/workspace", error]})
+
+    async for _ in router.wrap_stream({"chat_id": "session-1"}, stream()):
+        pass
+
+    ok, failed = [update for _, update in client.updates[2:]]
+    assert ok.tool_call_id == "call-ok"
+    assert ok.status == "completed"
+    assert failed.tool_call_id == "call-fail"
+    assert failed.status == "failed"
+    assert failed.raw_output == error.as_dict()
+    assert "command exited with code 1" in failed.content[0].content.text
 
 
 @pytest.mark.asyncio
