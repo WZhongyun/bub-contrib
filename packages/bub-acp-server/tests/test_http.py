@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pluggy
 import pytest
 import typer
 from acp import connect_to_agent
@@ -35,6 +36,7 @@ from bub.channels.manager import ChannelManager
 from bub.channels.message import ChannelMessage
 from bub.streaming import StreamEvent
 from bub.core.events import EventBus
+from bub.hooks import BUB_HOOK_NAMESPACE
 from bub.core.tape import (
     AsyncTapeStoreAdapter,
     InMemoryTapeStore,
@@ -86,6 +88,8 @@ class HTTPFramework:
         self.inbox = ACPSteeringInbox()
         # ChannelManager publishes WorkChanged on bub main through this bus.
         self.events = EventBus()
+        # ChannelManager registers its reply-via-channel prompt plugin here.
+        self.plugin_manager = pluggy.PluginManager(BUB_HOOK_NAMESPACE)
 
     def bind_channel_router(self, router: Any) -> None:
         self.router = router
